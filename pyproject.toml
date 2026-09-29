@@ -1,0 +1,53 @@
+[project]
+name = "rory-core"
+version = "0.1.0"
+description = "Rory's shared half: the Acme Energy tool surface and the vendor clients behind it. Transport-agnostic by construction — every transport runs this code unchanged."
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+    "httpx>=0.27",
+    "stripe>=11.0",
+    "loguru>=0.7",
+]
+
+[project.optional-dependencies]
+# Silero VAD for the cascaded transports that own their turn-taking (rory_tools/vad.py).
+vad = ["onnxruntime>=1.18", "numpy>=2.0", "audioop-lts; python_version >= '3.13'"]
+
+[dependency-groups]
+test = ["pytest>=8.0"]
+dev = [{ include-group = "test" }, "rory-pipecat", "rory-gemini-live", "rory-elevenlabs", "rory-deepgram", "rory-openai-realtime", "rory-livekit", "rory-mistral", "rory-fluxions", "rory-huggingface", "rory-grok-voice", "rory-vapi", "rory-cartesia", "rory-gradium", "rory-polyai", "rory-gpt-live"]
+
+[tool.uv.sources]
+rory-pipecat = { workspace = true }
+rory-gemini-live = { workspace = true }
+rory-elevenlabs = { workspace = true }
+rory-deepgram = { workspace = true }
+rory-openai-realtime = { workspace = true }
+rory-livekit = { workspace = true }
+rory-mistral = { workspace = true }
+rory-fluxions = { workspace = true }
+rory-huggingface = { workspace = true }
+rory-grok-voice = { workspace = true }
+rory-vapi = { workspace = true }
+rory-cartesia = { workspace = true }
+rory-gradium = { workspace = true }
+rory-polyai = { workspace = true }
+rory-gpt-live = { workspace = true }
+
+[tool.uv.workspace]
+members = ["pipecat", "gemini-live", "elevenlabs", "deepgram", "openai-realtime", "livekit", "mistral", "fluxions", "huggingface", "grok-voice", "vapi", "cartesia", "gradium", "polyai", "gpt-live"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["rory_tools"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+# The shared suite plus each transport's own parity run. Inside an image only
+# one transport is installed and it runs its own directory; from the dev
+# workspace every transport is present, so run all of them.
+testpaths = ["tests", "pipecat/tests", "gemini-live/tests", "elevenlabs/tests", "deepgram/tests", "openai-realtime/tests", "livekit/tests", "mistral/tests", "fluxions/tests", "huggingface/tests", "grok-voice/tests", "vapi/tests", "cartesia/tests", "gradium/tests", "polyai/tests", "gpt-live/tests"]

@@ -1,0 +1,37 @@
+# Test image for running Rory's shared half against Veris dependency twins.
+#
+# Recorded for `veris-proxy run`:
+#   tag:     rory-core:veris
+#   build:   docker build -f Dockerfile.veris -t rory-core:veris .
+#   run:     veris-proxy run --sandbox <id> --image rory-core:veris \
+#              --require-service stripe --require-service fineract \
+#              -- uv run --no-sync python -m pytest tests/test_integration.py -q
+#   workdir: /agent
+#
+# It installs rory-core only — the tools and the vendor clients. That is
+# deliberate: the integration tests exercise `rory_tools.dispatch`, which is the
+# code path every transport runs, so there is nothing transport-specific to
+# install and nothing for a transport's dependencies to perturb.
+#
+# This image takes no Veris configuration of any kind: no base URLs, no CA
+# wiring, no proxy variables. veris-proxy runs it beside a proxy container
+# sharing a network namespace and redirects the outbound HTTPS in the kernel,
+# so the vendor hostnames and credentials the code already uses are the ones
+# exercised.
+
+FROM python:3.12-slim
+
+# uv, to install from the committed lockfile exactly as the sandbox image does.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /agent
+
+COPY pyproject.toml uv.lock README.md ./
+COPY pipecat/pyproject.toml pipecat/README.md ./pipecat/
+COPY gemini-live/pyproject.toml gemini-live/README.md ./gemini-live/
+COPY rory_tools ./rory_tools
+COPY pipecat/rory_pipecat ./pipecat/rory_pipecat
+COPY gemini-live/rory_gemini_live ./gemini-live/rory_gemini_live
+RUN uv sync --frozen --no-editable --package rory-core --no-dev --group test
+COPY tests ./tests
+USER root
