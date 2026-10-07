@@ -1,10 +1,10 @@
 """The turn loop: streamed LLM text into TTS, and barge-in trimming what was said.
 
 Each LLM round streams its text straight into an xAI TTS utterance while the
-audio plays back. When the caller talks over it the speaking task is
-cancelled, the utterance is cleared on xAI's socket, and the history gets only
-the words whose audio had gone out — otherwise the next turn reasons from
-things the caller never heard.
+audio plays back. When the caller talks over it the audio stops, the utterance
+is cleared on xAI's socket, and the history gets only the words whose audio
+had gone out — otherwise the next turn reasons from things the caller never
+heard. The LLM round itself always completes, so its tool calls still run.
 """
 
 from __future__ import annotations
@@ -141,7 +141,6 @@ def _wire(monkeypatch, actor: _Actor, tts: _Tts, rounds: list[list] | None = Non
     monkeypatch.setattr(agent, "PLAYBACK_LEAD_S", float("inf"))
     call = agent._Call(actor)
     call._tts = tts
-    call._greeted = True
     actor.call = call
     queued = list(rounds or [])
 
@@ -153,6 +152,15 @@ def _wire(monkeypatch, actor: _Actor, tts: _Tts, rounds: list[list] | None = Non
         chat=SimpleNamespace(completions=SimpleNamespace(create=create))
     ), raising=False)
     return call
+
+
+async def _turn(call, text: str) -> None:
+    """One caller turn, as the worker runs it."""
+    call._replying, call._cut = True, False
+    try:
+        await call._take_turn(text)
+    finally:
+        call._replying = False
 
 
 @pytest.fixture
@@ -167,7 +175,7 @@ def test_streamed_reply_goes_to_tts_token_by_token(monkeypatch, log_lines):
     actor, tts = _Actor(), _Tts()
     call = _wire(monkeypatch, actor, tts)
 
-    asyncio.run(call._take_turn("hello"))
+    asyncio.run(_turn(call, "hello"))
 
     assert [m["delta"] for m in tts.sent if m["type"] == "text.delta"] == [
         c.choices[0].delta.content for c in _text(REPLY)
@@ -185,8 +193,8 @@ def test_barge_in_mid_reply_keeps_the_words_whose_audio_went_out(monkeypatch, lo
     call = _wire(monkeypatch, actor, tts)
 
     async def two_turns():
-        await call._take_turn("hello")
-        await call._take_turn("wait, what?")
+        await _turn(call, "hello")
+        await _turn(call, "wait, what?")
 
     asyncio.run(two_turns())
 
@@ -209,8 +217,8 @@ def test_barge_in_before_any_audio_leaves_no_reply_on_the_history(monkeypatch, l
     call = _wire(monkeypatch, actor, tts)
 
     async def turn_with_early_barge_in():
-        worker = asyncio.create_task(call._take_turn("hello"))
-        while call._speaking is None:
+        worker = asyncio.create_task(_turn(call, "hello"))
+        while not call._replying:
             await asyncio.sleep(0)
         call._on_voice()
         await worker
@@ -218,12 +226,37 @@ def test_barge_in_before_any_audio_leaves_no_reply_on_the_history(monkeypatch, l
     asyncio.run(turn_with_early_barge_in())
 
     assert actor.sent == []
-    # Nothing was sent to xAI yet; the clear is still sent, and acknowledged.
-    assert tts.types() == ["text.clear"]
+    assert tts.sent == []  # the caller was already talking: no utterance opened
     assert call.messages[-1] == {"role": "user", "content": "hello"}
     assert [line for line in log_lines if "[voice] barge-in" in line] == [
         "[voice] barge-in: dropped reply, nothing sent before the cut"
     ]
+
+
+def test_barge_in_during_a_tool_round_still_runs_the_tool_and_ends_the_turn(monkeypatch, log_lines):
+    # The caller talks over the preamble. The tool the model decided on still
+    # runs and is on the history; no further round is spoken.
+    round_one = _text("Let me check that for you right now.") + [
+        _chunk(tool_calls=[_tool_call(0, id="call_1", name="verify_caller", arguments='{"x": 1}')]),
+    ]
+    actor, tts = _Actor(barge_in_after=2), _Tts()
+    call = _wire(monkeypatch, actor, tts, rounds=[round_one, _text(REPLY)])
+    dispatched = []
+    monkeypatch.setattr(agent, "dispatch", lambda session, name, args: dispatched.append(name) or {"verified": True})
+
+    asyncio.run(_turn(call, "my account is 447"))
+
+    assert dispatched == ["verify_caller"]
+    assert call.messages[-3:] == [
+        {"role": "user", "content": "my account is 447"},
+        {
+            "role": "assistant",
+            "content": f"Let me{agent.INTERRUPTED_MARKER}",
+            "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "verify_caller", "arguments": '{"x": 1}'}}],
+        },
+        {"role": "tool", "name": "verify_caller", "tool_call_id": "call_1", "content": '{"verified": true}'},
+    ]
+    assert tts.types() == ["text.delta", "text.done", "text.clear"]
 
 
 def test_tool_round_is_assembled_from_fragments_and_its_preamble_spoken(monkeypatch):
@@ -245,7 +278,7 @@ def test_tool_round_is_assembled_from_fragments_and_its_preamble_spoken(monkeypa
 
     monkeypatch.setattr(agent, "dispatch", dispatch)
 
-    asyncio.run(call._take_turn("what do I owe?"))
+    asyncio.run(_turn(call, "what do I owe?"))
 
     assert dispatched == [("get_account", {"account_number": "447129"})]
     assert call.messages[-4:] == [
@@ -271,7 +304,7 @@ def test_tool_only_round_opens_no_utterance(monkeypatch):
     call = _wire(monkeypatch, actor, tts, rounds=[round_one, _text(REPLY)])
     monkeypatch.setattr(agent, "dispatch", lambda session, name, args: {"bills": []})
 
-    asyncio.run(call._take_turn("my bills?"))
+    asyncio.run(_turn(call, "my bills?"))
 
     assert "content" not in call.messages[-3]
     assert tts.types() == ["text.delta", "text.done"]
@@ -287,7 +320,7 @@ def test_odd_length_chunks_reach_the_actor_as_whole_samples(monkeypatch):
     actor, tts = _Actor(), _Tts(chunks)
     call = _wire(monkeypatch, actor, tts)
 
-    asyncio.run(call._take_turn("hello"))
+    asyncio.run(_turn(call, "hello"))
 
     assert all(len(c) % 2 == 0 for c in actor.sent)
     assert b"".join(actor.sent) == stream
@@ -298,11 +331,10 @@ def test_greeting_plays_in_full_over_caller_speech(monkeypatch):
     # greeting is spoken whole and recorded as said.
     actor, tts = _Actor(barge_in_after=1), _Tts()
     call = _wire(monkeypatch, actor, tts)
-    call._greeted = False
 
     async def greet_only():
         worker = asyncio.create_task(call._turn_worker())
-        while not call._greeted:
+        while len(call.messages) < 3:
             await asyncio.sleep(0)
         worker.cancel()
         await asyncio.gather(worker, return_exceptions=True)
@@ -324,7 +356,7 @@ def test_reply_is_paced_against_playback(monkeypatch):
     monkeypatch.setattr(agent, "PLAYBACK_LEAD_S", 1.0)
 
     t0 = time.monotonic()
-    asyncio.run(call._take_turn("hello"))
+    asyncio.run(_turn(call, "hello"))
 
     assert time.monotonic() - t0 >= 0.45
     assert [len(c) for c in actor.sent] == [agent.PLAYBACK_CHUNK_BYTES] * 4

@@ -183,8 +183,9 @@ class _Call:
         self._voiced = False               # Silero's last verdict
         self._vad = SileroVad(ACTOR_RATE_HZ)
         self._turns: asyncio.Queue[str] = asyncio.Queue()
-        self._speaking: asyncio.Task | None = None
-        self._greeted = False              # barge-in is live once the greeting has played
+        self._replying = False             # a caller turn is being answered
+        self._cut = False                  # ...and the caller talked over it
+        self._player: asyncio.Task | None = None  # TTS audio → actor for the reply in flight
         self._said = ""                    # text of the in-flight reply sent to TTS
         self._sent_bytes = 0               # PCM16 of the in-flight reply handed to the actor
 
@@ -258,11 +259,19 @@ class _Call:
             raise
 
     def _on_voice(self) -> None:
-        """The caller started speaking: cut off any reply in progress."""
+        """The caller started speaking: cut off the reply in progress.
+
+        Only the audio stops. The LLM round behind it runs to the end, so a
+        tool call the model has decided on still runs and is recorded — the
+        turn just says nothing more.
+        """
         logger.info("[vad] caller started speaking")
-        if self._greeted and self._speaking is not None and not self._speaking.done():
-            logger.info("[vad] barge-in — cutting the reply short")
-            self._speaking.cancel()
+        if not self._replying or self._cut:
+            return
+        logger.info("[vad] barge-in — cutting the reply short")
+        self._cut = True
+        if self._player is not None:
+            self._player.cancel()
 
     async def _pump_stt_events(self) -> None:
         """Transcription events → turn text.
@@ -313,21 +322,26 @@ class _Call:
         # silence and hung up after 30 s. A caller who does talk over it has
         # their turn taken right after.
         logger.info("[turn] speaking greeting (agent greets first)")
-        await self._speak(_once(GREETING))
+        await self._say(_once(GREETING))
         self.messages.append({"role": "assistant", "content": GREETING})
-        self._greeted = True
 
         while True:
             text = await self._turns.get()
-            await self._take_turn(text)
+            self._replying, self._cut = True, False
+            try:
+                await self._take_turn(text)
+            finally:
+                self._replying = False
 
     async def _take_turn(self, text: str) -> None:
         """One caller turn: LLM rounds (with tools), each spoken as it streams.
 
         A round's text goes to TTS token by token as the model writes it, so a
         round that says "let me check that" before calling a tool is heard
-        before the tool runs. A barge-in ends the turn: the caller's next
-        utterance is already on its way to the queue.
+        before the tool runs. A barge-in silences the rest of the turn, but
+        the round it lands in still completes and its tool calls still run;
+        then the turn ends, and the caller's next utterance takes it from
+        there with the results already on the history.
         """
         self.messages.append({"role": "user", "content": text})
 
@@ -343,26 +357,26 @@ class _Call:
                 **LLM_EXTRA,
             )
             async with stream:
-                spoken = await self._speak(_content(stream, tool_calls, t0))
-            if not spoken:
-                return
+                said = await self._say(_content(stream, tool_calls, t0))
             msg: dict = {"role": "assistant"}
-            if self._said:
-                msg["content"] = self._said
-                logger.info(f"[llm] rory_said: {self._said}")
+            content = self._heard(said) if self._cut else said
+            if content:
+                msg["content"] = content
+                logger.info(f"[llm] rory_said: {content}")
             if tool_calls:
                 msg["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
-            self.messages.append(msg)
+            if len(msg) > 1:
+                self.messages.append(msg)
             logger.info(
                 f"[llm] {LLM_MODEL} round done in {time.monotonic() - t0:.2f}s "
                 f"({len(tool_calls)} tool calls)"
             )
-            if not tool_calls:
-                return
             # One at a time, in the order emitted: calls share verification and
             # payment state on the session.
-            for call in msg["tool_calls"]:
+            for call in msg.get("tool_calls", []):
                 self.messages.append(await self._run_tool(call))
+            if self._cut or not tool_calls:
+                return
         raise RuntimeError(f"tool loop did not settle in {MAX_TOOL_ROUNDS} rounds")
 
     async def _run_tool(self, call: dict) -> dict:
@@ -382,53 +396,26 @@ class _Call:
             "content": json.dumps(result, default=str),
         }
 
-    async def _speak(self, deltas: AsyncIterator[str]) -> bool:
-        """Speak ``deltas`` as they arrive; False if the caller barged in.
-
-        The text spoken collects on ``_said``. On a barge-in, the part the
-        caller heard is recorded on ``messages``, marked as cut off, and the
-        utterance is cleared on xAI's socket.
-        """
-        self._said = ""
-        self._sent_bytes = 0
-        self._speaking = asyncio.create_task(self._say(deltas))
-        try:
-            await self._speaking
-            return True
-        except asyncio.CancelledError:
-            # Barge-in cancels only the speaking task, and the worker carries
-            # on to the caller's next turn. A cancel aimed at the worker itself
-            # (the call ending mid-reply) lands here too, and swallowing that
-            # would leave the worker parked on the queue forever.
-            if asyncio.current_task().cancelling():
-                raise
-            self._record_interrupted_reply()
-            await self._clear_tts()
-            return False
-        finally:
-            self._speaking = None
-
-    def _record_interrupted_reply(self) -> None:
-        """Put the part of the reply that went out on ``messages``.
+    def _heard(self, said: str) -> str | None:
+        """The part of ``said`` whose audio went out before the barge-in, marked.
 
         Without this the history says Rory told the caller things they never
-        heard, or nothing at all, and the next turn reasons from that. The cut
-        is proportional over the words sent to TTS: the PCM sent to the actor,
-        in ms, at TTS_MS_PER_WORD. Bytes handed to the actor count as heard;
-        the pacer runs at most PLAYBACK_LEAD_S ahead, so that overstates it by
-        no more.
+        heard, and the next turn reasons from that. The cut is proportional
+        over the words sent to TTS: the PCM sent to the actor, in ms, at
+        TTS_MS_PER_WORD. Bytes handed to the actor count as heard; the pacer
+        runs at most PLAYBACK_LEAD_S ahead, so that overstates it by no more.
         """
         if self._sent_bytes == 0:
             logger.info("[voice] barge-in: dropped reply, nothing sent before the cut")
-            return
+            return None
         heard_ms = self._sent_bytes // PCM16_BYTES_PER_MS
-        words = self._said.split()
+        words = said.split()
         kept = " ".join(words[: heard_ms // TTS_MS_PER_WORD])
-        self.messages.append({"role": "assistant", "content": f"{kept}{INTERRUPTED_MARKER}"})
         logger.info(
             f"[voice] barge-in: trimmed reply to {heard_ms} ms / "
             f'{len(words) * TTS_MS_PER_WORD} ms ("{kept[:60]}")'
         )
+        return f"{kept}{INTERRUPTED_MARKER}"
 
     async def _clear_tts(self) -> None:
         """Abandon the utterance on the TTS socket so the next reply starts clean.
@@ -446,30 +433,50 @@ class _Call:
         else:
             raise RuntimeError("xAI TTS closed the stream")
 
-    async def _say(self, deltas: AsyncIterator[str]) -> None:
+    async def _say(self, deltas: AsyncIterator[str]) -> str:
         """One TTS utterance: text deltas up as they arrive, audio back to the actor.
 
-        Text goes to xAI unchunked — xAI buffers it and decides when to
-        synthesize. The audio is played by a second task while text is still
-        going up, so speech starts on the reply's first words. A round with no
-        text (only tool calls) opens no utterance.
+        Returns the text sent to TTS. Text goes to xAI unchunked — xAI buffers
+        it and decides when to synthesize — and the audio is played by a
+        second task while text is still going up, so speech starts on the
+        reply's first words. A round with no text (only tool calls) opens no
+        utterance.
+
+        ``deltas`` is always read to the end, so a barge-in never cuts a
+        completion short of its tool calls: once the caller is talking, the
+        remaining text is read and not sent, and the utterance is cleared.
         """
-        player = None
+        said = ""
+        self._sent_bytes = 0
         t0 = time.monotonic()
         try:
             async for delta in deltas:
-                if player is None:
-                    player = asyncio.create_task(self._play(t0), name="tts->actor")
-                self._said += delta
+                if self._cut:
+                    continue
+                if self._player is None:
+                    self._player = asyncio.create_task(self._play(t0), name="tts->actor")
+                said += delta
                 await self._tts.send(json.dumps({"type": "text.delta", "delta": delta}))
-            if player is None:
-                return
-            await self._tts.send(json.dumps({"type": "text.done"}))
-            await player
+            if self._player is None:
+                return said
+            if not self._cut:
+                await self._tts.send(json.dumps({"type": "text.done"}))
+            try:
+                await self._player
+            except asyncio.CancelledError:
+                # The barge-in cancelled the player. A cancel aimed at this
+                # task (the call ending mid-reply) lands here too, and must
+                # propagate.
+                if asyncio.current_task().cancelling():
+                    raise
+            if self._cut:
+                await self._clear_tts()
+            return said
         finally:
-            if player is not None and not player.done():
-                player.cancel()
-                await asyncio.gather(player, return_exceptions=True)
+            if self._player is not None and not self._player.done():
+                self._player.cancel()
+                await asyncio.gather(self._player, return_exceptions=True)
+            self._player = None
 
     async def _play(self, t0: float) -> None:
         """Grok TTS audio → the actor, paced against playback.
