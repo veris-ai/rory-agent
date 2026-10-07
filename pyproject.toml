@@ -16,7 +16,7 @@ vad = ["onnxruntime>=1.18", "numpy>=2.0", "audioop-lts; python_version >= '3.13'
 
 [dependency-groups]
 test = ["pytest>=8.0"]
-dev = [{ include-group = "test" }, "rory-pipecat", "rory-gemini-live", "rory-elevenlabs", "rory-deepgram", "rory-openai-realtime", "rory-livekit", "rory-mistral", "rory-fluxions", "rory-huggingface", "rory-grok-voice", "rory-vapi", "rory-cartesia", "rory-gradium", "rory-polyai", "rory-gpt-live"]
+dev = [{ include-group = "test" }, "rory-pipecat", "rory-gemini-live", "rory-elevenlabs", "rory-deepgram", "rory-openai-realtime", "rory-livekit", "rory-mistral", "rory-fluxions", "rory-huggingface", "rory-grok-voice", "rory-vapi", "rory-cartesia", "rory-gradium", "rory-polyai", "rory-gpt-live", "rory-grok-cascade"]
 
 [tool.uv.sources]
 rory-pipecat = { workspace = true }
@@ -34,9 +34,10 @@ rory-cartesia = { workspace = true }
 rory-gradium = { workspace = true }
 rory-polyai = { workspace = true }
 rory-gpt-live = { workspace = true }
+rory-grok-cascade = { workspace = true }
 
 [tool.uv.workspace]
-members = ["pipecat", "gemini-live", "elevenlabs", "deepgram", "openai-realtime", "livekit", "mistral", "fluxions", "huggingface", "grok-voice", "vapi", "cartesia", "gradium", "polyai", "gpt-live"]
+members = ["pipecat", "gemini-live", "elevenlabs", "deepgram", "openai-realtime", "livekit", "mistral", "fluxions", "huggingface", "grok-voice", "vapi", "cartesia", "gradium", "polyai", "gpt-live", "grok-cascade"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["rory_tools"]
@@ -50,4 +51,4 @@ pythonpath = ["."]
 # The shared suite plus each transport's own parity run. Inside an image only
 # one transport is installed and it runs its own directory; from the dev
 # workspace every transport is present, so run all of them.
-testpaths = ["tests", "pipecat/tests", "gemini-live/tests", "elevenlabs/tests", "deepgram/tests", "openai-realtime/tests", "livekit/tests", "mistral/tests", "fluxions/tests", "huggingface/tests", "grok-voice/tests", "vapi/tests", "cartesia/tests", "gradium/tests", "polyai/tests", "gpt-live/tests"]
+testpaths = ["tests", "pipecat/tests", "gemini-live/tests", "elevenlabs/tests", "deepgram/tests", "openai-realtime/tests", "livekit/tests", "mistral/tests", "fluxions/tests", "huggingface/tests", "grok-voice/tests", "vapi/tests", "cartesia/tests", "gradium/tests", "polyai/tests", "gpt-live/tests", "grok-cascade/tests"]

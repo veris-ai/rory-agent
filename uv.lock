@@ -17,6 +17,7 @@ members = [
     "rory-gemini-live",
     "rory-gpt-live",
     "rory-gradium",
+    "rory-grok-cascade",
     "rory-grok-voice",
     "rory-huggingface",
     "rory-livekit",
@@ -2526,6 +2527,7 @@ dev = [
     { name = "rory-gemini-live" },
     { name = "rory-gpt-live" },
     { name = "rory-gradium" },
+    { name = "rory-grok-cascade" },
     { name = "rory-grok-voice" },
     { name = "rory-huggingface" },
     { name = "rory-livekit" },
@@ -2560,6 +2562,7 @@ dev = [
     { name = "rory-gemini-live", editable = "gemini-live" },
     { name = "rory-gpt-live", editable = "gpt-live" },
     { name = "rory-gradium", editable = "gradium" },
+    { name = "rory-grok-cascade", editable = "grok-cascade" },
     { name = "rory-grok-voice", editable = "grok-voice" },
     { name = "rory-huggingface", editable = "huggingface" },
     { name = "rory-livekit", editable = "livekit" },
@@ -2738,6 +2741,37 @@ requires-dist = [
     { name = "gradbot", specifier = ">=0.2,<0.3" },
     { name = "rory-core", editable = "." },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=8.0" }]
+
+[[package]]
+name = "rory-grok-cascade"
+version = "0.1.0"
+source = { editable = "grok-cascade" }
+dependencies = [
+    { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
+    { name = "fastapi" },
+    { name = "openai" },
+    { name = "rory-core", extra = ["vad"] },
+    { name = "uvicorn", extra = ["standard"] },
+    { name = "websockets" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "openai", specifier = ">=1.60" },
+    { name = "rory-core", extras = ["vad"], editable = "." },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+    { name = "websockets", specifier = ">=14" },
 ]
 
 [package.metadata.requires-dev]
