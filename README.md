@@ -43,6 +43,7 @@ wrong.
 | [`gradium`](gradium/) | gradbot — Gradium's open-source Rust voice engine running Gradium streaming STT and TTS around an OpenAI-compatible LLM (`gpt-4.1-mini`) in-process, turn-taking and barge-in owned by the engine, Rory's tools handed back to the pod through the shared dispatcher |
 | [`polyai`](polyai/) | PolyAI Agent Studio — a hosted platform whose agent is project configuration pushed by the ADK at boot, reached over its WebRTC gateway with aiortc, with Rory's tools as Agent Studio functions that POST back through a quick tunnel |
 | [`gpt-live`](gpt-live/) | OpenAI GPT-Live (`gpt-live-1`) — a full-duplex live model over one websocket per call that delegates tool use to a Responses backend model (`LIVE_BACKEND_MODEL`), Rory's tools answered by the pod as function-call outputs |
+| [`grok-cascade`](grok-cascade/) | xAI Grok streaming STT and TTS around a chat LLM — a hand-rolled cascade, xAI Smart Turn deciding when the caller's turn is over; `GROK_CASCADE_LLM` picks `gpt-4.1-mini` or `grok-4.3` with reasoning off |
 
 Each ships as its own image, built from one shared lockfile with
 `uv sync --package`, so a candidate carries only its own voice SDK. Most have
@@ -61,7 +62,8 @@ rory_tools/    the 16 tools, their implementations, the vendor clients,
 pipecat/       Pipecat transport
 gemini-live/   Gemini Live transport
 openai-realtime/, deepgram/, elevenlabs/, livekit/, mistral/, fluxions/, huggingface/,
-grok-voice/, vapi/, cartesia/, gradium/, polyai/, gpt-live/   thirteen more transports, same contract
+grok-voice/, vapi/, cartesia/, gradium/, polyai/, gpt-live/,
+grok-cascade/  fourteen more transports, same contract
 ```
 
 A transport is expected to use three things — `SCHEMAS`, `CallSession`, and
