@@ -1,9 +1,10 @@
-"""Barge-in trims the interrupted reply to the audio the caller heard.
+"""The turn loop: streamed LLM text into TTS, and barge-in trimming what was said.
 
-The LLM's reply is on ``messages`` before it is spoken. When the caller talks
-over it the TTS read is cancelled, the utterance is cleared on xAI's socket,
-and the message must shrink to the words whose audio had gone out —
-otherwise the next turn reasons from things the caller never heard.
+Each LLM round streams its text straight into an xAI TTS utterance while the
+audio plays back. When the caller talks over it the speaking task is
+cancelled, the utterance is cleared on xAI's socket, and the history gets only
+the words whose audio had gone out — otherwise the next turn reasons from
+things the caller never heard.
 """
 
 from __future__ import annotations
@@ -15,12 +16,11 @@ import time
 from types import SimpleNamespace
 
 import pytest
-from openai.types.chat import ChatCompletionMessage
 
 from rory_grok_cascade import agent
 
 REPLY = "one two three four five six seven eight nine ten eleven twelve"
-WORDS = REPLY.split()
+REPLY_MESSAGE = {"role": "assistant", "content": REPLY}
 # One chunk per nominal word.
 CHUNK_BYTES = agent.TTS_MS_PER_WORD * agent.PCM16_BYTES_PER_MS
 
@@ -46,7 +46,7 @@ class _Actor:
             self.call._on_voice()
 
 
-def _delta(pcm: bytes) -> str:
+def _audio(pcm: bytes) -> str:
     return json.dumps({"type": "audio.delta", "delta": base64.b64encode(pcm).decode()})
 
 
@@ -69,16 +69,15 @@ class _Tts:
         if msg["type"] == "text.delta":
             self._text += msg["delta"]
         elif msg["type"] == "text.done":
-            words = self._text.split()
-            chunks = self._chunks or [b"\0" * CHUNK_BYTES] * len(words)
+            chunks = self._chunks or [b"\0" * CHUNK_BYTES] * len(self._text.split())
             for pcm in chunks:
-                self._inbox.put_nowait(_delta(pcm))
+                self._inbox.put_nowait(_audio(pcm))
             self._inbox.put_nowait(json.dumps({"type": "audio.done"}))
             self._text = ""
         elif msg["type"] == "text.clear":
             while not self._inbox.empty():
                 self._inbox.get_nowait()
-            self._inbox.put_nowait(_delta(b"\0" * CHUNK_BYTES))
+            self._inbox.put_nowait(_audio(b"\0" * CHUNK_BYTES))
             self._inbox.put_nowait(json.dumps({"type": "audio.clear"}))
 
     def __aiter__(self):
@@ -88,29 +87,72 @@ class _Tts:
         return await self._inbox.get()
 
     def types(self) -> list[str]:
-        return [m["type"] for m in self.sent]
+        """Message types sent, with each run of text deltas collapsed to one."""
+        out: list[str] = []
+        for m in self.sent:
+            if not (m["type"] == "text.delta" and out and out[-1] == "text.delta"):
+                out.append(m["type"])
+        return out
 
 
-def _wire(monkeypatch, actor: _Actor, tts: _Tts):
-    """Stub the LLM leg and the TTS socket; return the call bound to ``actor``."""
+def _chunk(content=None, tool_calls=None):
+    return SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=content, tool_calls=tool_calls))])
+
+
+def _text(reply: str) -> list:
+    """A streamed reply, one token per word as the model would send it."""
+    words = reply.split()
+    return [_chunk(w if i == 0 else f" {w}") for i, w in enumerate(words)]
+
+
+def _tool_call(index, *, id=None, name=None, arguments=None):
+    return SimpleNamespace(index=index, id=id, function=SimpleNamespace(name=name, arguments=arguments))
+
+
+class _Stream:
+    """``AsyncStream``: an async context manager over the completion's chunks."""
+
+    def __init__(self, chunks: list):
+        self._chunks = list(chunks)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return None
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await asyncio.sleep(0)
+        if not self._chunks:
+            raise StopAsyncIteration
+        return self._chunks.pop(0)
+
+
+def _wire(monkeypatch, actor: _Actor, tts: _Tts, rounds: list[list] | None = None):
+    """Stub the LLM leg and the TTS socket; return the call bound to ``actor``.
+
+    ``rounds`` are the streamed completions handed out in order; by default
+    every completion is REPLY.
+    """
     # Pacing is real-time sleeps; the trim is about what was sent, not when.
     monkeypatch.setattr(agent, "PLAYBACK_LEAD_S", float("inf"))
     call = agent._Call(actor)
     call._tts = tts
+    call._greeted = True
     actor.call = call
+    queued = list(rounds or [])
 
     async def create(**kwargs):
-        return SimpleNamespace(choices=[SimpleNamespace(
-            message=ChatCompletionMessage(role="assistant", content=REPLY)
-        )])
+        assert kwargs["stream"] is True
+        return _Stream(queued.pop(0) if queued else _text(REPLY))
 
     monkeypatch.setattr(agent, "_llm", SimpleNamespace(
         chat=SimpleNamespace(completions=SimpleNamespace(create=create))
     ), raising=False)
     return call
-
-
-REPLY_MESSAGE = {"role": "assistant", "content": REPLY}
 
 
 @pytest.fixture
@@ -121,21 +163,24 @@ def log_lines():
     agent.logger.remove(handle)
 
 
-def test_reply_spoken_in_full_leaves_the_message_unchanged(monkeypatch, log_lines):
+def test_streamed_reply_goes_to_tts_token_by_token(monkeypatch, log_lines):
     actor, tts = _Actor(), _Tts()
     call = _wire(monkeypatch, actor, tts)
 
     asyncio.run(call._take_turn("hello"))
 
+    assert [m["delta"] for m in tts.sent if m["type"] == "text.delta"] == [
+        c.choices[0].delta.content for c in _text(REPLY)
+    ]
+    assert tts.types() == ["text.delta", "text.done"]
     assert len(actor.sent) == 12
     assert call.messages[-2:] == [{"role": "user", "content": "hello"}, REPLY_MESSAGE]
-    assert tts.types() == ["text.delta", "text.done"]
     assert not [line for line in log_lines if "[voice] barge-in" in line]
 
 
 def test_barge_in_mid_reply_keeps_the_words_whose_audio_went_out(monkeypatch, log_lines):
-    # Twelve words is a nominal 3960 ms; the caller speaks after five chunks,
-    # so 1650 ms went out and five words are kept.
+    # Twelve words is a nominal 3660 ms; the caller speaks after five chunks,
+    # so 1525 ms went out and five words are kept.
     actor, tts = _Actor(barge_in_after=5), _Tts()
     call = _wire(monkeypatch, actor, tts)
 
@@ -155,11 +200,11 @@ def test_barge_in_mid_reply_keeps_the_words_whose_audio_went_out(monkeypatch, lo
         REPLY_MESSAGE,
     ]
     assert [line for line in log_lines if "barge-in: trimmed" in line] == [
-        '[voice] barge-in: trimmed reply to 1650 ms / 3960 ms ("one two three four five")'
+        '[voice] barge-in: trimmed reply to 1525 ms / 3660 ms ("one two three four five")'
     ]
 
 
-def test_barge_in_before_any_audio_drops_the_message(monkeypatch, log_lines):
+def test_barge_in_before_any_audio_leaves_no_reply_on_the_history(monkeypatch, log_lines):
     actor, tts = _Actor(), _Tts()
     call = _wire(monkeypatch, actor, tts)
 
@@ -181,6 +226,58 @@ def test_barge_in_before_any_audio_drops_the_message(monkeypatch, log_lines):
     ]
 
 
+def test_tool_round_is_assembled_from_fragments_and_its_preamble_spoken(monkeypatch):
+    # Round one says a few words, then streams a tool call in pieces; round
+    # two answers. Both rounds are spoken, each as its own utterance.
+    preamble = "Let me check."
+    round_one = _text(preamble) + [
+        _chunk(tool_calls=[_tool_call(0, id="call_1", name="get_account", arguments="")]),
+        _chunk(tool_calls=[_tool_call(0, arguments='{"account_')]),
+        _chunk(tool_calls=[_tool_call(0, arguments='number": "447129"}')]),
+    ]
+    actor, tts = _Actor(), _Tts()
+    call = _wire(monkeypatch, actor, tts, rounds=[round_one, _text(REPLY)])
+    dispatched = []
+
+    def dispatch(session, name, args):
+        dispatched.append((name, args))
+        return {"ok": True}
+
+    monkeypatch.setattr(agent, "dispatch", dispatch)
+
+    asyncio.run(call._take_turn("what do I owe?"))
+
+    assert dispatched == [("get_account", {"account_number": "447129"})]
+    assert call.messages[-4:] == [
+        {"role": "user", "content": "what do I owe?"},
+        {
+            "role": "assistant",
+            "content": preamble,
+            "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "get_account", "arguments": '{"account_number": "447129"}'},
+            }],
+        },
+        {"role": "tool", "name": "get_account", "tool_call_id": "call_1", "content": '{"ok": true}'},
+        REPLY_MESSAGE,
+    ]
+    assert tts.types() == ["text.delta", "text.done", "text.delta", "text.done"]
+
+
+def test_tool_only_round_opens_no_utterance(monkeypatch):
+    round_one = [_chunk(tool_calls=[_tool_call(0, id="call_1", name="list_bills", arguments="{}")])]
+    actor, tts = _Actor(), _Tts()
+    call = _wire(monkeypatch, actor, tts, rounds=[round_one, _text(REPLY)])
+    monkeypatch.setattr(agent, "dispatch", lambda session, name, args: {"bills": []})
+
+    asyncio.run(call._take_turn("my bills?"))
+
+    assert "content" not in call.messages[-3]
+    assert tts.types() == ["text.delta", "text.done"]
+    assert call.messages[-1] == REPLY_MESSAGE
+
+
 def test_odd_length_chunks_reach_the_actor_as_whole_samples(monkeypatch):
     # xAI cuts PCM at arbitrary byte boundaries; the actor must only ever see
     # whole 16-bit samples, in order.
@@ -196,24 +293,41 @@ def test_odd_length_chunks_reach_the_actor_as_whole_samples(monkeypatch):
     assert b"".join(actor.sent) == stream
 
 
-def test_greeting_is_on_the_history_before_it_is_spoken(monkeypatch):
-    # A caller talking over the greeting trims it like any reply, which needs
-    # it appended first.
+def test_greeting_plays_in_full_over_caller_speech(monkeypatch):
+    # Background speech at the start of the call must not silence Rory: the
+    # greeting is spoken whole and recorded as said.
     actor, tts = _Actor(barge_in_after=1), _Tts()
     call = _wire(monkeypatch, actor, tts)
+    call._greeted = False
 
     async def greet_only():
         worker = asyncio.create_task(call._turn_worker())
-        while not actor.sent or call._speaking is not None:
+        while not call._greeted:
             await asyncio.sleep(0)
         worker.cancel()
         await asyncio.gather(worker, return_exceptions=True)
 
     asyncio.run(greet_only())
 
-    assert call.messages[-1]["role"] == "assistant"
-    assert call.messages[-1]["content"].endswith(agent.INTERRUPTED_MARKER)
-    assert call.messages[-1]["content"] != agent.GREETING
+    assert len(actor.sent) == len(agent.GREETING.split())
+    assert tts.types() == ["text.delta", "text.done"]
+    assert call.messages[-1] == {"role": "assistant", "content": agent.GREETING}
+
+
+def test_reply_is_paced_against_playback(monkeypatch):
+    # xAI delivers the whole reply at once here; a slice only goes out once
+    # playback is within PLAYBACK_LEAD_S of its start, so the last of four
+    # 0.5 s slices waits until 0.5 s in.
+    one_second = b"\0" * (1000 * agent.PCM16_BYTES_PER_MS)
+    actor, tts = _Actor(), _Tts([one_second, one_second])
+    call = _wire(monkeypatch, actor, tts)
+    monkeypatch.setattr(agent, "PLAYBACK_LEAD_S", 1.0)
+
+    t0 = time.monotonic()
+    asyncio.run(call._take_turn("hello"))
+
+    assert time.monotonic() - t0 >= 0.45
+    assert [len(c) for c in actor.sent] == [agent.PLAYBACK_CHUNK_BYTES] * 4
 
 
 class _Stt:
@@ -251,19 +365,3 @@ def test_only_utterance_finals_become_turns():
 
     assert call._turns.qsize() == 1
     assert call._turns.get_nowait() == "my account number is 4 4 7 1 2"
-
-
-def test_reply_is_paced_against_playback(monkeypatch):
-    # xAI delivers the whole reply at once here; a slice only goes out once
-    # playback is within PLAYBACK_LEAD_S of its start, so the last of four
-    # 0.5 s slices waits until 0.5 s in.
-    one_second = b"\0" * (1000 * agent.PCM16_BYTES_PER_MS)
-    actor, tts = _Actor(), _Tts([one_second, one_second])
-    call = _wire(monkeypatch, actor, tts)
-    monkeypatch.setattr(agent, "PLAYBACK_LEAD_S", 1.0)
-
-    t0 = time.monotonic()
-    asyncio.run(call._take_turn("hello"))
-
-    assert time.monotonic() - t0 >= 0.45
-    assert [len(c) for c in actor.sent] == [agent.PLAYBACK_CHUNK_BYTES] * 4

@@ -3,9 +3,9 @@
 Listens on ``/voice`` for one bidirectional PCM16 stream from the Veris actor.
 xAI's streaming STT and TTS are separate services, so this process is the
 pipeline: Grok STT transcribes the caller over a WebSocket and decides when
-their turn is over (Smart Turn), a chat completion reasons over the transcript
-and calls Rory's 16 tools, and Grok TTS speaks the reply back over a second
-WebSocket. Conversation state lives here — no vendor holds the session.
+their turn is over (Smart Turn), a streamed chat completion reasons over the
+transcript and calls Rory's 16 tools, and its tokens go straight into Grok TTS
+over a second WebSocket, which speaks the reply back as it is written. Conversation state lives here — no vendor holds the session.
 
 The chat model is ``gpt-4.1-mini`` by default, the model the other cascades
 run, so the vendor legs are what differs; ``GROK_CASCADE_LLM=grok-4.3`` swaps
@@ -16,19 +16,19 @@ same greeting, same frozen-clock date context, same tools, same dispatcher. The
 candidates exist to be compared, so the transport is the only thing allowed to
 differ.
 
-Sample-rate note: the Veris actor speaks and listens at 24 kHz PCM16. xAI
-documents 16 kHz as its STT model's native rate, so caller audio is downsampled
-on the way in. TTS is asked for 24 kHz PCM, so replies need no conversion.
+Sample-rate note: the Veris actor speaks and listens at 24 kHz PCM16, and both
+xAI legs are told so — STT takes the caller's audio as it arrives and TTS
+returns 24 kHz PCM — so no audio is converted here.
 """
 
 from __future__ import annotations
 
 import asyncio
-import audioop
 import base64
 import json
 import os
 import time
+from collections.abc import AsyncIterator
 from urllib.parse import urlencode
 
 import websockets
@@ -52,27 +52,26 @@ LLM_MODEL = os.environ.get("GROK_CASCADE_LLM", "gpt-4.1-mini")
 LLM_BASE_URL, LLM_KEY_ENV, LLM_EXTRA = LLMS[LLM_MODEL]
 
 STT_MODEL = os.environ.get("GROK_STT_MODEL", "grok-voice-transcribe-2.0")
-# Same voice as the grok-voice speech-to-speech candidate, so the two xAI
-# candidates sound alike.
-TTS_VOICE = os.environ.get("GROK_VOICE", "eve")
+# xAI's recommendation for this agent.
+TTS_VOICE = os.environ.get("GROK_VOICE", "carina")
 
 ACTOR_RATE_HZ = 24000
-STT_RATE_HZ = 16000
 
 # Smart Turn: at each silence boundary xAI scores whether the caller has
 # finished, and only a score above SMART_TURN ends the turn (`speech_final`);
-# below it the utterance stays open. 0.5 is xAI's "balanced" setting. Without a
+# below it the utterance stays open. 0.7 is xAI's setting for callers reading
+# out numbers, which Rory's callers do to be verified. Without a
 # timeout the model holds the turn open indefinitely, which background speech —
 # the bench mixes a television under some callers — could stretch forever, so
 # a turn is forced closed after SMART_TURN_TIMEOUT_MS of silence regardless
 # (xAI's documented example value).
-SMART_TURN = 0.5
+SMART_TURN = 0.7
 SMART_TURN_TIMEOUT_MS = 3000
 
 STT_URL = "wss://api.x.ai/v1/stt?" + urlencode({
     "model": STT_MODEL,
     "encoding": "pcm",
-    "sample_rate": STT_RATE_HZ,
+    "sample_rate": ACTOR_RATE_HZ,
     "language": "en",
     # Spoken numbers come back as digits — account numbers, amounts, dates.
     "format": "true",
@@ -88,13 +87,13 @@ TTS_URL = "wss://api.x.ai/v1/tts?" + urlencode({
 })
 PCM16_BYTES_PER_MS = ACTOR_RATE_HZ * 2 // 1000
 
-# How long a word of the reply takes the voice to say, measured on `eve`
-# (318–345 ms/word across replies). A barge-in cuts the reply at the audio
+# How long a word of the reply takes the voice to say, measured on `carina`
+# (306 ms/word over four replies, 238–341 each). A barge-in cuts the reply at the audio
 # sent, and this turns that into words. xAI's `with_timestamps` would give
 # per-character alignment instead, but it arrives a sentence late — each
 # sentence's characters come after its audio — so at the cut the sentence the
 # caller interrupted has none yet.
-TTS_MS_PER_WORD = 330
+TTS_MS_PER_WORD = 305
 
 # xAI streams a reply about five times faster than it plays, so sent as it
 # lands the whole reply sits in the actor's buffer within two seconds and a
@@ -185,6 +184,8 @@ class _Call:
         self._vad = SileroVad(ACTOR_RATE_HZ)
         self._turns: asyncio.Queue[str] = asyncio.Queue()
         self._speaking: asyncio.Task | None = None
+        self._greeted = False              # barge-in is live once the greeting has played
+        self._said = ""                    # text of the in-flight reply sent to TTS
         self._sent_bytes = 0               # PCM16 of the in-flight reply handed to the actor
 
     async def run(self) -> None:
@@ -199,7 +200,7 @@ class _Call:
                 raise RuntimeError(f"xAI STT opened with {created}")
             logger.info(
                 f"[voice] xAI STT and TTS connected stt_id={created['id']} "
-                f"in={ACTOR_RATE_HZ}Hz stt={STT_RATE_HZ}Hz"
+                f"rate={ACTOR_RATE_HZ}Hz"
             )
 
             tasks = [
@@ -218,13 +219,12 @@ class _Call:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _pump_actor_to_stt(self) -> None:
-        """Binary PCM16 frames from the actor (24 kHz) → xAI STT (16 kHz).
+        """Binary PCM16 frames from the actor → xAI STT, unconverted.
 
         Frames go up as they arrive, at the actor's real-time pace. The actor
         streams continuously, silence included, so the STT session never sits
         without audio.
         """
-        resample_state = None  # carried across ratecv calls so the resample is continuous
         n_frames = 0
         n_bytes = 0
         try:
@@ -242,10 +242,7 @@ class _Call:
                     self._on_voice()
                 self._voiced = voiced
 
-                pcm16k, resample_state = audioop.ratecv(
-                    frame, 2, 1, ACTOR_RATE_HZ, STT_RATE_HZ, resample_state
-                )
-                await self._stt.send(pcm16k)
+                await self._stt.send(frame)
         except WebSocketDisconnect as exc:
             logger.info(
                 f"[a->stt] actor disconnected after {n_frames} frames "
@@ -263,7 +260,7 @@ class _Call:
     def _on_voice(self) -> None:
         """The caller started speaking: cut off any reply in progress."""
         logger.info("[vad] caller started speaking")
-        if self._speaking is not None and not self._speaking.done():
+        if self._greeted and self._speaking is not None and not self._speaking.done():
             logger.info("[vad] barge-in — cutting the reply short")
             self._speaking.cancel()
 
@@ -307,54 +304,66 @@ class _Call:
         """
         # Rory speaks first. Spoken straight through TTS rather than asked of
         # the LLM, as Pipecat does, so the opening words are verbatim and the
-        # first turn costs no completion. Seeded as the first assistant turn so
-        # the model knows it has already greeted and doesn't repeat it, and
-        # seeded before it is spoken, like every reply, so a caller talking
-        # over it trims it too.
+        # first turn costs no completion. Recorded as the first assistant turn
+        # so the model knows it has already greeted and doesn't repeat it.
+        #
+        # The greeting is not interruptible. The bench's background noise
+        # starts with the call, and a television under the caller cut the
+        # greeting at 0.4 s, before any audio went out: the caller heard
+        # silence and hung up after 30 s. A caller who does talk over it has
+        # their turn taken right after.
         logger.info("[turn] speaking greeting (agent greets first)")
+        await self._speak(_once(GREETING))
         self.messages.append({"role": "assistant", "content": GREETING})
-        await self._speak(GREETING)
+        self._greeted = True
 
         while True:
             text = await self._turns.get()
             await self._take_turn(text)
 
     async def _take_turn(self, text: str) -> None:
-        """One caller turn: LLM (with tools) → spoken reply."""
+        """One caller turn: LLM rounds (with tools), each spoken as it streams.
+
+        A round's text goes to TTS token by token as the model writes it, so a
+        round that says "let me check that" before calling a tool is heard
+        before the tool runs. A barge-in ends the turn: the caller's next
+        utterance is already on its way to the queue.
+        """
         self.messages.append({"role": "user", "content": text})
 
         for _ in range(MAX_TOOL_ROUNDS):
             t0 = time.monotonic()
-            completion = await _llm.chat.completions.create(
+            tool_calls: dict[int, dict] = {}
+            stream = await _llm.chat.completions.create(
                 model=LLM_MODEL,
                 messages=self.messages,
                 tools=TOOLS,
                 tool_choice="auto",
+                stream=True,
                 **LLM_EXTRA,
             )
-            # Keep only the portable OpenAI-schema fields: Grok returns
-            # reasoning fields on the message that are not for replaying.
-            msg = completion.choices[0].message.model_dump(
-                include={"role", "content", "tool_calls"}, exclude_none=True
-            )
+            async with stream:
+                spoken = await self._speak(_content(stream, tool_calls, t0))
+            if not spoken:
+                return
+            msg: dict = {"role": "assistant"}
+            if self._said:
+                msg["content"] = self._said
+                logger.info(f"[llm] rory_said: {self._said}")
+            if tool_calls:
+                msg["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
             self.messages.append(msg)
-            tool_calls = msg.get("tool_calls") or []
             logger.info(
-                f"[llm] {LLM_MODEL} replied in {time.monotonic() - t0:.2f}s "
+                f"[llm] {LLM_MODEL} round done in {time.monotonic() - t0:.2f}s "
                 f"({len(tool_calls)} tool calls)"
             )
             if not tool_calls:
-                break
+                return
             # One at a time, in the order emitted: calls share verification and
             # payment state on the session.
-            for call in tool_calls:
+            for call in msg["tool_calls"]:
                 self.messages.append(await self._run_tool(call))
-        else:
-            raise RuntimeError(f"tool loop did not settle in {MAX_TOOL_ROUNDS} rounds")
-
-        if msg.get("content"):
-            logger.info(f"[llm] rory_said: {msg['content']}")
-            await self._speak(msg["content"])
+        raise RuntimeError(f"tool loop did not settle in {MAX_TOOL_ROUNDS} rounds")
 
     async def _run_tool(self, call: dict) -> dict:
         """Dispatch one tool call and build the tool message for the next round."""
@@ -373,48 +382,52 @@ class _Call:
             "content": json.dumps(result, default=str),
         }
 
-    async def _speak(self, text: str) -> None:
-        """Speak the last assistant message, cancellable by barge-in.
+    async def _speak(self, deltas: AsyncIterator[str]) -> bool:
+        """Speak ``deltas`` as they arrive; False if the caller barged in.
 
-        ``text`` is that message's content, already on ``messages`` so a
-        barge-in can cut it down to what the caller heard.
+        The text spoken collects on ``_said``. On a barge-in, the part the
+        caller heard is recorded on ``messages``, marked as cut off, and the
+        utterance is cleared on xAI's socket.
         """
+        self._said = ""
         self._sent_bytes = 0
-        self._speaking = asyncio.create_task(self._speak_now(text))
+        self._speaking = asyncio.create_task(self._say(deltas))
         try:
             await self._speaking
+            return True
         except asyncio.CancelledError:
-            # Barge-in cancels only the TTS task, and the worker carries on to
-            # the caller's next turn. A cancel aimed at the worker itself (the
-            # call ending mid-reply) lands here too, and swallowing that would
-            # leave the worker parked on the queue forever.
+            # Barge-in cancels only the speaking task, and the worker carries
+            # on to the caller's next turn. A cancel aimed at the worker itself
+            # (the call ending mid-reply) lands here too, and swallowing that
+            # would leave the worker parked on the queue forever.
             if asyncio.current_task().cancelling():
                 raise
-            self._trim_interrupted_reply(text)
+            self._record_interrupted_reply()
             await self._clear_tts()
+            return False
         finally:
             self._speaking = None
 
-    def _trim_interrupted_reply(self, text: str) -> None:
-        """Rewrite the last assistant message to the part of ``text`` that went out.
+    def _record_interrupted_reply(self) -> None:
+        """Put the part of the reply that went out on ``messages``.
 
         Without this the history says Rory told the caller things they never
-        heard, and the next turn reasons from that. The cut is proportional
-        over the reply's words: the PCM sent to the actor, in ms, at
-        TTS_MS_PER_WORD. Bytes handed to the actor count as heard; the pacer
-        runs at most PLAYBACK_LEAD_S ahead, so that overstates it by no more.
+        heard, or nothing at all, and the next turn reasons from that. The cut
+        is proportional over the words sent to TTS: the PCM sent to the actor,
+        in ms, at TTS_MS_PER_WORD. Bytes handed to the actor count as heard;
+        the pacer runs at most PLAYBACK_LEAD_S ahead, so that overstates it by
+        no more.
         """
         if self._sent_bytes == 0:
-            self.messages.pop()
             logger.info("[voice] barge-in: dropped reply, nothing sent before the cut")
             return
         heard_ms = self._sent_bytes // PCM16_BYTES_PER_MS
-        words = text.split()
-        total_ms = len(words) * TTS_MS_PER_WORD
+        words = self._said.split()
         kept = " ".join(words[: heard_ms // TTS_MS_PER_WORD])
-        self.messages[-1] = {"role": "assistant", "content": f"{kept}{INTERRUPTED_MARKER}"}
+        self.messages.append({"role": "assistant", "content": f"{kept}{INTERRUPTED_MARKER}"})
         logger.info(
-            f'[voice] barge-in: trimmed reply to {heard_ms} ms / {total_ms} ms ("{kept[:60]}")'
+            f"[voice] barge-in: trimmed reply to {heard_ms} ms / "
+            f'{len(words) * TTS_MS_PER_WORD} ms ("{kept[:60]}")'
         )
 
     async def _clear_tts(self) -> None:
@@ -433,19 +446,40 @@ class _Call:
         else:
             raise RuntimeError("xAI TTS closed the stream")
 
-    async def _speak_now(self, text: str) -> None:
-        """Stream Grok TTS to the actor, paced against playback.
+    async def _say(self, deltas: AsyncIterator[str]) -> None:
+        """One TTS utterance: text deltas up as they arrive, audio back to the actor.
 
-        The whole reply goes up as one utterance; audio comes back as 24 kHz
-        PCM16, the actor's format. The first slice goes out as soon as it
-        lands, so the actor hears the reply onset immediately; after that
-        slices go out no more than PLAYBACK_LEAD_S ahead of real-time
-        playback, and cancelling this task strands the rest unsent.
+        Text goes to xAI unchunked — xAI buffers it and decides when to
+        synthesize. The audio is played by a second task while text is still
+        going up, so speech starts on the reply's first words. A round with no
+        text (only tool calls) opens no utterance.
         """
+        player = None
         t0 = time.monotonic()
-        await self._tts.send(json.dumps({"type": "text.delta", "delta": text}))
-        await self._tts.send(json.dumps({"type": "text.done"}))
+        try:
+            async for delta in deltas:
+                if player is None:
+                    player = asyncio.create_task(self._play(t0), name="tts->actor")
+                self._said += delta
+                await self._tts.send(json.dumps({"type": "text.delta", "delta": delta}))
+            if player is None:
+                return
+            await self._tts.send(json.dumps({"type": "text.done"}))
+            await player
+        finally:
+            if player is not None and not player.done():
+                player.cancel()
+                await asyncio.gather(player, return_exceptions=True)
 
+    async def _play(self, t0: float) -> None:
+        """Grok TTS audio → the actor, paced against playback.
+
+        Audio comes back as 24 kHz PCM16, the actor's format. The first slice
+        goes out as soon as it lands, so the actor hears the reply onset
+        immediately; after that slices go out no more than PLAYBACK_LEAD_S
+        ahead of real-time playback, and cancelling this task strands the rest
+        unsent.
+        """
         # xAI cuts its PCM stream at arbitrary byte boundaries, so a chunk can
         # end mid-sample; the stray byte leads the next chunk.
         carry = b""
@@ -462,7 +496,7 @@ class _Call:
                 n_chunks += 1
                 n_bytes += len(pcm)
                 if n_chunks == 1:
-                    logger.info(f"[tts] first chunk after {time.monotonic() - t0:.2f}s ({len(pcm)} bytes)")
+                    logger.info(f"[tts] first audio {time.monotonic() - t0:.2f}s after the first text")
                     t_play = time.monotonic()
                 for i in range(0, len(pcm), PLAYBACK_CHUNK_BYTES):
                     sent_s = self._sent_bytes / 2 / ACTOR_RATE_HZ
@@ -479,6 +513,38 @@ class _Call:
         else:
             raise RuntimeError("xAI TTS closed the stream")
         logger.info(
-            f"[tts] spoke {n_chunks} chunks ({n_bytes} bytes, "
-            f"{n_bytes / 2 / ACTOR_RATE_HZ:.1f}s audio) in {time.monotonic() - t0:.2f}s"
+            f"[tts] spoke {n_chunks} chunks ({n_bytes / 2 / ACTOR_RATE_HZ:.1f}s audio) "
+            f"in {time.monotonic() - t0:.2f}s"
         )
+
+
+async def _once(text: str) -> AsyncIterator[str]:
+    yield text
+
+
+async def _content(stream, tool_calls: dict[int, dict], t0: float) -> AsyncIterator[str]:
+    """The text of a streamed completion, collecting its tool calls on the side.
+
+    Tool calls stream as fragments keyed by index — the id and name arrive
+    once, the arguments in pieces — and are assembled into ``tool_calls``.
+    """
+    first = True
+    async for chunk in stream:
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        if first and (delta.content or delta.tool_calls):
+            logger.info(f"[llm] first token after {time.monotonic() - t0:.2f}s")
+            first = False
+        for part in delta.tool_calls or []:
+            call = tool_calls.setdefault(part.index, {
+                "id": None, "type": "function", "function": {"name": "", "arguments": ""},
+            })
+            if part.id:
+                call["id"] = part.id
+            if part.function.name:
+                call["function"]["name"] += part.function.name
+            if part.function.arguments:
+                call["function"]["arguments"] += part.function.arguments
+        if delta.content:
+            yield delta.content

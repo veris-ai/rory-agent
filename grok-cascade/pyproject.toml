@@ -10,7 +10,6 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "openai>=1.60",
     "websockets>=14",
-    "audioop-lts; python_version >= '3.13'",
 ]
 
 [dependency-groups]

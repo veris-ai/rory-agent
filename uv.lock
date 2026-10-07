@@ -2751,7 +2751,6 @@ name = "rory-grok-cascade"
 version = "0.1.0"
 source = { editable = "grok-cascade" }
 dependencies = [
-    { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
     { name = "fastapi" },
     { name = "openai" },
     { name = "rory-core", extra = ["vad"] },
@@ -2766,7 +2765,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "openai", specifier = ">=1.60" },
     { name = "rory-core", extras = ["vad"], editable = "." },
