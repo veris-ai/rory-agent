@@ -6,21 +6,24 @@ rory-core.
 
 The sibling [`grok-voice`](../grok-voice/) runs xAI's speech-to-speech model;
 this one keeps the three legs apart so xAI's STT and TTS can be scored against
-the other cascades on the same LLM:
+the cascades that run the same LLM (Pipecat, LiveKit, Gradium, Deepgram,
+ElevenLabs and Vapi run `gpt-4.1-mini`):
 
 ```
 actor 24 kHz ─► Grok STT (Smart Turn) ─► chat LLM + Rory's tools ─► tokens ─► Grok TTS 24 kHz ─► actor
-        └─► Silero VAD ─► barge-in: cancel + text.clear
+        └─► Silero VAD ─► barge-in: stop audio + text.clear
 ```
 
 | Env | Default |
 |---|---|
 | `XAI_API_KEY` | required — STT and TTS, and the LLM when it is Grok |
-| `GROK_CASCADE_LLM` | `gpt-4.1-mini` (the other cascades' model, needs `OPENAI_API_KEY`); `grok-4.3` runs Grok with `reasoning_effort: none` on xAI's OpenAI-compatible API |
+| `STRIPE_API_KEY` | required — sandbox fixture; the billing twin's credential |
+| `GROK_CASCADE_LLM` | `gpt-4.1-mini` (needs `OPENAI_API_KEY`); `grok-4.3` runs Grok with `reasoning_effort: none` on xAI's OpenAI-compatible API |
 | `GROK_STT_MODEL` | `grok-voice-transcribe-2.0` |
 | `GROK_VOICE` | `carina` |
 
-A missing key for the selected LLM, or an unknown `GROK_CASCADE_LLM`, fails the boot.
+A missing `STRIPE_API_KEY`, `XAI_API_KEY` or key for the selected LLM, or an unknown
+`GROK_CASCADE_LLM`, fails the boot.
 
 ## Pipeline
 
@@ -54,9 +57,18 @@ and never accumulated.
 
 **Barge-in is local.** Silero VAD (`rory_tools.vad`) runs on the caller's
 audio, as in the Mistral and Hugging Face cascades, because it has to cut the
-reply within a frame or two. A barge-in cancels the reply and the LLM stream
-behind it, sends `text.clear` on the TTS socket and drops audio until
-`audio.clear`, so the next reply starts clean on the same socket.
+reply within a frame or two. A barge-in stops the audio to the actor at once.
+The LLM round it lands in still streams to the end without sending the rest of
+its text, and any tool call it emitted runs and is recorded; then the turn ends.
+Once that stream is done, `text.clear` goes to the TTS socket and audio is
+dropped until `audio.clear`, so the next reply starts clean on the same socket.
+
+**Known issue.** Barge-in stays armed for the whole turn, not only while Rory is
+speaking. A voice onset while a round's tools are running (background noise
+included) therefore ends the turn once the tools return, and the answer round
+after them never runs: the caller hears nothing until they speak again. The
+fix is to arm barge-in only around the spoken part of each round; it is left
+out here so this transport matches the version that was benchmarked.
 
 **The greeting plays in full.** The bench's background noise starts with the
 call, and a television under the caller triggered a barge-in 0.4 s into the
@@ -77,8 +89,9 @@ sends alignment with the audio.
 - STT: `language=en` and `format=true`, so spoken numbers come back as digits.
   Audio goes up in the actor's 20 ms frames at real-time pace.
 - TTS: one socket per call, one utterance per LLM round. xAI streams audio
-  ~5× faster than real time, so it goes to the actor in 0.5 s slices, at most
-  1 s ahead of playback, as in the Hugging Face cascade — sent as it lands, the
+  ~5× faster than real time, so it goes to the actor in 0.5 s slices, a slice
+  going out once playback is within 1 s of its start (at most 1.5 s ahead), as in
+  the Hugging Face cascade — sent as it lands, the
   whole reply is in the actor's buffer before the caller can interrupt it.
   `optimize_streaming_latency` and `text_normalization` stay on xAI's defaults.
 - xAI allows 50 concurrent TTS sockets per team. Each call holds one TTS socket
