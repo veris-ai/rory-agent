@@ -1,10 +1,10 @@
-# Rory on gradbot (Gradium STT + TTS) as a Veris Bench image candidate.
+# Rory on the xAI cascade as a Veris Bench image candidate.
 #
 # The bench platform runs this container directly: the engine injects the World's twin
 # base URLs (STRIPE_API_BASE, FINERACT_API_BASE) plus the candidate's env, polls
 # GET /health on :8008 for readiness, and opens the voice_ws session at ws://<pod>:8008/voice.
 #
-#   docker build --platform linux/amd64 -f gradium/Dockerfile -t rory-gradium .
+#   docker build --platform linux/amd64 -f grok-cascade/Dockerfile -t rory-grok-cascade .
 #
 # Built from the repo root. One transport per image: `uv sync --package` installs only
 # this member and rory-core out of the shared lockfile. Every member's pyproject is copied
@@ -35,9 +35,9 @@ COPY polyai/pyproject.toml polyai/README.md ./polyai/
 COPY gpt-live/pyproject.toml gpt-live/README.md ./gpt-live/
 COPY grok-cascade/pyproject.toml grok-cascade/README.md ./grok-cascade/
 COPY rory_tools ./rory_tools
-COPY gradium/rory_gradium ./gradium/rory_gradium
-RUN uv sync --frozen --no-dev --no-editable --package rory-gradium
-RUN uv run --no-sync python -c "import rory_gradium.web; from rory_tools.prompt import load_agent_prompt; assert load_agent_prompt()"
+COPY grok-cascade/rory_grok_cascade ./grok-cascade/rory_grok_cascade
+RUN uv sync --frozen --no-dev --no-editable --package rory-grok-cascade
+RUN uv run --no-sync python -c "import rory_grok_cascade.web; from rory_tools.prompt import load_agent_prompt; assert load_agent_prompt()"
 
 EXPOSE 8008
-CMD ["uv", "run", "--no-sync", "uvicorn", "rory_gradium.web:app", "--host", "0.0.0.0", "--port", "8008"]
+CMD ["uv", "run", "--no-sync", "uvicorn", "rory_grok_cascade.web:app", "--host", "0.0.0.0", "--port", "8008"]
