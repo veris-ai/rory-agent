@@ -183,3 +183,42 @@ def test_greeting_is_on_the_history_before_it_is_spoken(monkeypatch):
     assert call.messages[-1]["role"] == "assistant"
     assert call.messages[-1]["content"].endswith(agent.INTERRUPTED_MARKER)
     assert call.messages[-1]["content"] != agent.GREETING
+
+
+def test_reply_audio_is_paced_so_barge_in_has_something_to_cut(monkeypatch):
+    """Lightning delivers the whole reply at once; the actor must not get it at once.
+
+    Twelve chunks (4.2 s of audio) land instantly. A caller who talks 0.2 s in
+    must stop the rest: at most PLAYBACK_LEAD_S ahead of playback went out.
+    """
+    actor = _Actor()
+    call, reply = _wire(monkeypatch, actor, n_chunks=12)
+
+    async def scenario():
+        call.messages.append({"role": "assistant", "content": REPLY})
+        speak = asyncio.create_task(call._speak(REPLY))
+        await asyncio.sleep(0.2)
+        call._on_voice()
+        await speak
+
+    asyncio.run(scenario())
+    sent_s = sum(len(c) for c in actor.sent) / agent.PCM16_BYTES_PER_MS / 1000
+    assert sent_s <= 0.2 + agent.PLAYBACK_LEAD_S + agent.TTS_MS_PER_WORD / 1000
+    assert call.messages[-1]["content"].endswith(agent.INTERRUPTED_MARKER)
+
+
+def test_lightning_closing_before_complete_fails_the_reply(monkeypatch):
+    """A socket that ends without `complete` is a truncated reply, not a spoken one."""
+    actor = _Actor()
+    call, _ = _wire(monkeypatch, actor, n_chunks=2)
+    monkeypatch.setattr(_TTSConnection, "__init__", _truncated_init)
+
+    with pytest.raises(RuntimeError, match="before `complete`"):
+        asyncio.run(call._speak_now(REPLY))
+
+
+def _truncated_init(self, n_chunks, on_send=None):
+    audio = base64.b64encode(bytes(CHUNK_BYTES)).decode()
+    self._messages = [json.dumps({"status": "chunk", "data": {"audio": audio}})] * n_chunks
+    self._on_send = on_send
+    self._sent_text = False

@@ -107,6 +107,17 @@ FINALIZE_TIMEOUT_S = 1.5
 # benchmarked voice to measure against.
 TTS_MS_PER_WORD = 350
 
+# Lightning streams a reply faster than it plays, so sent as it lands the
+# whole reply sits in the actor's buffer within a second or two and a
+# barge-in has nothing left to cut. Replies go out in slices this long, paced
+# against playback, as in the xAI and Hugging Face cascades.
+PLAYBACK_CHUNK_BYTES = 500 * PCM16_BYTES_PER_MS
+
+# How far ahead of real-time playback the pacer is allowed to run. One slice
+# in the actor's buffer keeps the line gapless; more just widens the slice of
+# already-delivered audio barge-in can't claw back.
+PLAYBACK_LEAD_S = 1.0
+
 # Appended to a reply the caller talked over, in place of the words that were
 # never sent, so the model reads its own history as cut off rather than said.
 INTERRUPTED_MARKER = "… [interrupted by the caller]"
@@ -448,8 +459,8 @@ class _Call:
         messages carry no sentence boundaries, so the cut is proportional over
         the reply's words: the PCM sent to the actor, in ms, against the
         reply's length at TTS_MS_PER_WORD. Bytes handed to the actor count as
-        heard; the connection is unpaced, so that is an upper bound on what
-        was played.
+        heard; the pacer runs at most PLAYBACK_LEAD_S ahead, so that
+        overstates it by no more.
         """
         if self._sent_bytes == 0:
             self.messages.pop()
@@ -473,6 +484,11 @@ class _Call:
         a barge-in cancelling this coroutine simply closes the connection
         (the ``async with`` below) rather than leaving stale audio for the next
         reply to collide with.
+
+        The first slice goes out as soon as it lands, so the actor hears the
+        reply onset immediately; after that slices go out no more than
+        PLAYBACK_LEAD_S ahead of real-time playback, and cancelling this task
+        strands the rest unsent.
         """
         t0 = time.monotonic()
         async with websockets.connect(TTS_URL, additional_headers=_auth_headers()) as ws:
@@ -485,6 +501,7 @@ class _Call:
             }))
             n_chunks = 0
             n_bytes = 0
+            t_play = None  # playback clock, started at the first byte sent
             async for raw in ws:
                 msg = json.loads(raw)
                 status = msg.get("status")
@@ -496,14 +513,23 @@ class _Call:
                         logger.info(
                             f"[tts] first chunk after {time.monotonic() - t0:.2f}s ({len(pcm16)} bytes)"
                         )
-                    await self.actor_ws.send_bytes(pcm16)
-                    self._sent_bytes += len(pcm16)
+                        t_play = time.monotonic()
+                    for i in range(0, len(pcm16), PLAYBACK_CHUNK_BYTES):
+                        sent_s = self._sent_bytes / 2 / ACTOR_RATE_HZ
+                        ahead = sent_s - (time.monotonic() - t_play)
+                        if ahead > PLAYBACK_LEAD_S:
+                            await asyncio.sleep(ahead - PLAYBACK_LEAD_S)
+                        piece = pcm16[i : i + PLAYBACK_CHUNK_BYTES]
+                        await self.actor_ws.send_bytes(piece)
+                        self._sent_bytes += len(piece)
                 elif status == "complete":
                     break
                 elif status == "error":
                     raise RuntimeError(f"Lightning TTS error: {msg.get('error', msg)}")
                 else:
                     logger.warning(f"[tts] unknown message status: {msg}")
+            else:
+                raise RuntimeError("Lightning TTS closed the stream before `complete`")
             logger.info(
                 f"[tts] spoke {n_chunks} chunks ({n_bytes} bytes, "
                 f"{n_bytes / 2 / ACTOR_RATE_HZ:.1f}s audio) in {time.monotonic() - t0:.2f}s"
