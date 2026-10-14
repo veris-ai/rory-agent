@@ -302,13 +302,19 @@ class _Call:
         """
         # Rory speaks first. Spoken straight through TTS rather than asked of
         # the LLM, as Pipecat does, so the opening words are verbatim and the
-        # first turn costs no completion. Seeded as the first assistant turn so
-        # the model knows it has already greeted and doesn't repeat it, and
-        # seeded before it is spoken, like every reply, so a caller talking
-        # over it trims it too.
+        # first turn costs no completion. Recorded as the first assistant turn
+        # so the model knows it has already greeted and doesn't repeat it.
+        #
+        # The greeting is not interruptible, as in the xAI cascade. The bench's
+        # background noise starts with the call, and on the first smoke run
+        # Silero fired 0.15–0.3 s in and cancelled the greeting before any
+        # audio went out: the caller heard silence and hung up after 30 s. It
+        # is spoken by ``_speak_now`` directly, so ``_speaking`` stays unset and
+        # ``_on_voice`` has nothing to cancel. A caller who does talk over it
+        # has their turn taken right after.
         logger.info("[turn] speaking greeting (agent greets first)")
+        await self._speak_now(GREETING)
         self.messages.append({"role": "assistant", "content": GREETING})
-        await self._speak(GREETING)
 
         while True:
             text = await self._turns.get()

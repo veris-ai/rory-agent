@@ -165,24 +165,23 @@ def test_barge_in_before_any_audio_drops_the_message(monkeypatch, log_lines):
     ]
 
 
-def test_greeting_is_on_the_history_before_it_is_spoken(monkeypatch):
-    # A caller talking over the greeting trims it like any reply, which needs
-    # it appended first.
+def test_greeting_is_not_cut_by_voice_activity(monkeypatch):
+    # Background noise at call start trips the VAD; the greeting plays in full.
     actor = _Actor(barge_in_after=1)
     call, _ = _wire(monkeypatch, actor, n_chunks=12)
+    monkeypatch.setattr(agent, "PLAYBACK_LEAD_S", float("inf"))
 
     async def greet_only():
         worker = asyncio.create_task(call._turn_worker())
-        while not actor.sent or call._speaking is not None:
+        while call.messages[-1]["role"] != "assistant":
             await asyncio.sleep(0)
         worker.cancel()
         await asyncio.gather(worker, return_exceptions=True)
 
     asyncio.run(greet_only())
 
-    assert call.messages[-1]["role"] == "assistant"
-    assert call.messages[-1]["content"].endswith(agent.INTERRUPTED_MARKER)
-    assert call.messages[-1]["content"] != agent.GREETING
+    assert len(actor.sent) == 12
+    assert call.messages[-1] == {"role": "assistant", "content": agent.GREETING}
 
 
 def test_reply_audio_is_paced_so_barge_in_has_something_to_cut(monkeypatch):
