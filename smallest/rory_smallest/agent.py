@@ -449,7 +449,14 @@ class _Call:
         strands the rest unsent.
         """
         t0 = time.monotonic()
-        async with websockets.connect(TTS_URL, additional_headers=_auth_headers()) as ws:
+        # close_timeout=0: Lightning does not answer a close frame while it is
+        # still streaming, so a barge-in's close waited out the default 10 s
+        # handshake timeout — ten seconds of dead air before the caller's turn
+        # (8 of 27 barge-ins on the second VAmoS smoke run). The utterance is
+        # being abandoned; there is nothing to wait for.
+        async with websockets.connect(
+            TTS_URL, additional_headers=_auth_headers(), close_timeout=0
+        ) as ws:
             await ws.send(json.dumps({
                 "text": text,
                 "voice_id": VOICE,

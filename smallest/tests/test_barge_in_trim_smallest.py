@@ -94,7 +94,8 @@ def _wire(monkeypatch, actor: _Actor, *, n_chunks: int, barge_in_during_tts: boo
     async def complete(**kwargs):
         return SimpleNamespace(choices=[SimpleNamespace(message=reply)])
 
-    def connect(_url, **_kwargs):
+    def connect(_url, **kwargs):
+        call.tts_connect_kwargs = kwargs
         on_send = call._on_voice if barge_in_during_tts else None
         return _ConnectContext(_TTSConnection(n_chunks, on_send=on_send))
 
@@ -221,3 +222,13 @@ def _truncated_init(self, n_chunks, on_send=None):
     self._messages = [json.dumps({"status": "chunk", "data": {"audio": audio}})] * n_chunks
     self._on_send = on_send
     self._sent_text = False
+
+
+def test_tts_connection_does_not_wait_on_the_close_handshake(monkeypatch):
+    """Lightning ignores a close frame mid-stream; waiting on it stalled barge-ins 10 s."""
+    actor = _Actor()
+    call, _ = _wire(monkeypatch, actor, n_chunks=1)
+
+    asyncio.run(call._speak_now(REPLY))
+
+    assert call.tts_connect_kwargs["close_timeout"] == 0
