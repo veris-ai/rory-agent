@@ -7,20 +7,24 @@ Smallest ships the three legs of a voice agent as separate products rather
 than one session, so this process is the pipeline:
 
 ```
-actor 24 kHz ─► Pulse STT ─► Electron (chat model) + Rory's tools ─► Lightning TTS ─► actor
+actor 24 kHz ─► Pulse STT ─► chat model + Rory's tools ─► Lightning TTS ─► actor
         └─► Silero VAD ─► barge-in: cancel the TTS connection
 ```
 
-One `SMALLEST_API_KEY` covers all three legs. Pulse's live endpoint and
+One `SMALLEST_API_KEY` covers Pulse and Lightning. The chat model is
+`gpt-4.1-mini` by default, the model the other cascades run, so the vendor legs
+are what differs; `SMALLEST_LLM_MODEL=electron` swaps in Smallest's own model
+(Electron needs a plan with LLM access). Pulse's live endpoint and
 Lightning both accept 24 kHz directly — the actor's own rate — so unlike the
 Mistral and Hugging Face cascades, no audio is resampled anywhere in this
 transport.
 
 | Env | Default |
 |---|---|
-| `SMALLEST_API_KEY` | required — Pulse, Electron and Lightning, boot fails without it |
+| `SMALLEST_API_KEY` | required — Pulse and Lightning (and Electron), boot fails without it |
+| `OPENAI_API_KEY` | required with the default `gpt-4.1-mini` |
 | `STRIPE_API_KEY` | required — sandbox fixture; the billing twin's credential |
-| `SMALLEST_LLM_MODEL` | `electron` |
+| `SMALLEST_LLM_MODEL` | `gpt-4.1-mini`, or `electron` |
 | `SMALLEST_TTS_MODEL` | `lightning_v3.1_pro` — the premium pool: broadcast-quality voices, dedicated inference capacity, no cloning |
 | `SMALLEST_VOICE` | `kelsey` — must be a voice in the Pro pool |
 | `SMALLEST_LANGUAGE` | `en` |
@@ -37,7 +41,7 @@ the previous final, and Pulse finalizes on its own at a pause as short as
 the turn closes when the final answering our `finalize` (`from_finalize: true`)
 arrives — see `_endpoint` and `_pump_stt_events` in `agent.py`.
 
-**LLM.** A non-streaming Electron chat completion per round, with Rory's tools
+**LLM.** A non-streaming chat completion per round, with Rory's tools
 registered in the standard OpenAI function-calling shape. Electron can also
 return a spoken filler alongside `tool_calls` when prompted for one, but this
 transport does not use that: the shared `agent_desc.txt` is loaded verbatim

@@ -20,12 +20,12 @@ from starlette.websockets import WebSocketState
 
 from rory_tools.session import require_credentials
 
-from .agent import resolve_vendor, run_voice_ws_bot
+from .agent import LLM_KEY_ENV, resolve_vendor, run_voice_ws_bot
 
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
-    require_credentials("STRIPE_API_KEY", "SMALLEST_API_KEY")
+    require_credentials("STRIPE_API_KEY", "SMALLEST_API_KEY", LLM_KEY_ENV)
     await resolve_vendor()
     yield
 

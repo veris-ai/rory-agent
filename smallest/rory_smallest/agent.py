@@ -3,11 +3,11 @@
 Listens on ``/voice`` for one bidirectional PCM16 stream from the Veris actor.
 Smallest ships the three legs of a voice agent as separate products rather
 than one session, so this process *is* the pipeline: Pulse transcribes the
-caller over a WebSocket, Electron — Smallest's OpenAI-compatible chat model —
-reasons over the transcript and calls Rory's 16 tools, and Lightning speaks
-the reply back over a second WebSocket, one connection per utterance.
-Turn-taking, barge-in and conversation state live here — no vendor holds the
-session. One API key (``SMALLEST_API_KEY``) covers all three legs.
+caller over a WebSocket, a chat model (``gpt-4.1-mini`` by default, or
+Smallest's own Electron) reasons over the transcript and calls Rory's 16
+tools, and Lightning speaks the reply back over a second WebSocket, one
+connection per utterance. Turn-taking, barge-in and conversation state live
+here — no vendor holds the session.
 
 Everything below the transport is shared with the other agents — same prompt,
 same greeting, same frozen-clock date context, same tools, same dispatcher. The
@@ -40,7 +40,16 @@ from rory_tools.vad import SileroVad
 
 from .tools import TOOLS
 
-LLM_MODEL = os.environ.get("SMALLEST_LLM_MODEL", "electron")
+# model → (base URL, credential env). The chat model is ``gpt-4.1-mini`` by
+# default, the model the other cascades run, so the vendor legs are what
+# differs; ``SMALLEST_LLM_MODEL=electron`` swaps in Smallest's own model,
+# making the same image a second candidate.
+LLMS = {
+    "gpt-4.1-mini": ("https://api.openai.com/v1", "OPENAI_API_KEY"),
+    "electron": ("https://api.smallest.ai/waves/v1", "SMALLEST_API_KEY"),
+}
+LLM_MODEL = os.environ.get("SMALLEST_LLM_MODEL", "gpt-4.1-mini")
+LLM_BASE_URL, LLM_KEY_ENV = LLMS[LLM_MODEL]
 # The Pro pool: broadcast-quality voices, dedicated inference capacity, no
 # cloning. Pro is picky about voice/model pairing — confirmed live, a
 # standard-pool voice like "sophia" on this model is rejected outright by the
@@ -50,8 +59,6 @@ LLM_MODEL = os.environ.get("SMALLEST_LLM_MODEL", "electron")
 TTS_MODEL = os.environ.get("SMALLEST_TTS_MODEL", "lightning_v3.1_pro")
 VOICE = os.environ.get("SMALLEST_VOICE", "kelsey")
 LANGUAGE = os.environ.get("SMALLEST_LANGUAGE", "en")
-
-LLM_BASE_URL = "https://api.smallest.ai/waves/v1"
 
 # The Veris actor speaks and listens at 24 kHz PCM16. Pulse's live endpoint
 # accepts 8000/16000/22050/24000/44100/48000 Hz and Lightning can be asked for
@@ -127,9 +134,9 @@ def _auth_headers() -> dict[str, str]:
 
 
 async def resolve_vendor() -> None:
-    """Build the shared Electron client once per process, after the credential check."""
+    """Build the shared chat client once per process, after the credential check."""
     global _llm
-    _llm = AsyncOpenAI(base_url=LLM_BASE_URL, api_key=os.environ["SMALLEST_API_KEY"])
+    _llm = AsyncOpenAI(base_url=LLM_BASE_URL, api_key=os.environ[LLM_KEY_ENV])
     logger.info(f"[startup] stt=pulse llm={LLM_MODEL} tts={TTS_MODEL} voice={VOICE}")
 
 
