@@ -148,7 +148,7 @@ def test_barge_in_mid_reply_keeps_the_words_whose_audio_went_out(monkeypatch, lo
     ]
     assert call.messages[-1] == {"role": "assistant", "content": REPLY}
     assert [line for line in log_lines if "barge-in: trimmed" in line] == [
-        '[voice] barge-in: trimmed reply to 1750 ms / 4200 ms ("one two three four five")'
+        '[voice] barge-in: trimmed reply to 1700 ms / 4080 ms ("one two three four five")'
     ]
 
 

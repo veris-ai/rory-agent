@@ -86,26 +86,15 @@ TTS_URL = "wss://api.smallest.ai/waves/v1/tts/live"
 # not arrive at a steady rate, and a wall-clock timer would endpoint mid-burst.
 END_OF_TURN_S = 0.8
 
-# Pulse finalizes on trailing silence, on word count, and on a client-sent
-# `finalize` message — so a turn can already be closed by the time our own
-# silence timer fires. How long to wait for Pulse to acknowledge our request
-# (another `is_final` transcript event) before giving up and using whatever
-# text has arrived so far, rather than stalling the call.
-FINALIZE_TIMEOUT_S = 1.5
-
 # Whether the caller is speaking comes from Silero VAD (rory_tools.vad), not
 # frame energy: the bench mixes cafe and television audio under the caller,
 # and an energy gate hears that as a caller who never stops talking.
 
-# How long a word of the reply takes Lightning to say — a nominal estimate,
-# not a measured one (unlike the Mistral and xAI cascades' TTS_MS_PER_WORD,
-# this has not been benchmarked against the deployed voice). Needed because a
-# barge-in cancels the TTS connection mid-reply, and Lightning's `chunk`
-# frames carry no text alignment of their own. Lightning's WebSocket supports
-# `word_timestamps` for English/Hindi voices, which would replace this
-# estimate with an exact cut — worth adding once this transport has a
-# benchmarked voice to measure against.
-TTS_MS_PER_WORD = 350
+# How long a word of the reply takes Lightning to say, measured on `kelsey`
+# (338 ms/word over four replies, 288–381 each). Needed because a barge-in
+# cancels the TTS connection mid-reply, and Lightning's `chunk` frames carry no
+# text alignment of their own, so the cut turns audio sent into words.
+TTS_MS_PER_WORD = 340
 
 # Lightning streams a reply faster than it plays, so sent as it lands the
 # whole reply sits in the actor's buffer within a second or two and a
@@ -184,11 +173,9 @@ class _Call:
         self._voiced = False               # caller is mid-utterance
         self._silence_s = 0.0              # audio seconds since the last voiced frame
         self._vad = SileroVad(ACTOR_RATE_HZ)
-        self._latest_transcript = ""       # most recent non-empty `is_final` transcript
-        self._finalize_ack = asyncio.Event()
+        self._segments: list[str] = []     # `is_final` texts of the turn in progress
         self._turns: asyncio.Queue[str] = asyncio.Queue()
         self._speaking: asyncio.Task | None = None
-        self._endpointing: asyncio.Task | None = None  # in-flight _endpoint(), if any
         self._sent_bytes = 0  # PCM16 of the in-flight reply handed to the actor
 
     async def run(self) -> None:
@@ -208,9 +195,6 @@ class _Call:
             for task in tasks:
                 if not task.done():
                     task.cancel()
-            if self._endpointing is not None and not self._endpointing.done():
-                self._endpointing.cancel()
-                tasks.append(self._endpointing)
             await asyncio.gather(*tasks, return_exceptions=True)
             await self._stt.close()
 
@@ -240,26 +224,7 @@ class _Call:
                 elif self._voiced:
                     self._silence_s += len(frame) / 2 / ACTOR_RATE_HZ
                     if self._silence_s >= END_OF_TURN_S:
-                        # Fire-and-forget: Smallest's own reference client sends
-                        # audio and reads responses as two independent tasks and
-                        # never pauses the sender to wait on one — awaiting
-                        # _endpoint() inline here would stall this loop (and with
-                        # it, Pulse ingestion and barge-in detection) for up to
-                        # FINALIZE_TIMEOUT_S on every single turn. Reset the
-                        # state that guards re-entry now, synchronously, so a
-                        # later silent frame can't schedule a second endpoint
-                        # before this one has even started running.
-                        self._voiced = False
-                        self._silence_s = 0.0
-                        if self._endpointing is None or self._endpointing.done():
-                            self._endpointing = asyncio.create_task(self._endpoint())
-                        # else: a finalize is already in flight (the caller
-                        # paused, resumed, and paused again before it resolved).
-                        # Two concurrent _endpoint() calls would both wait on
-                        # the same _finalize_ack and could both fire on one
-                        # ack — the pending one already picks up whatever
-                        # _latest_transcript holds once it resolves, so a
-                        # second is never needed.
+                        await self._endpoint()
 
                 await self._stt.send(frame)
         except WebSocketDisconnect as exc:
@@ -288,63 +253,43 @@ class _Call:
             self._speaking.cancel()
 
     async def _endpoint(self) -> None:
-        """The caller has stopped: ask Pulse to finalize and collect the turn's text.
+        """The caller has stopped: ask Pulse to finalize the turn.
 
-        Runs as its own task, not awaited inline by the audio pump — Smallest's
-        own reference client keeps sending audio on a task independent of the
-        one reading responses, and never blocks the sender on a reply. Pulse
-        also keeps the session open across a finalize, so there is nothing to
-        pause audio for regardless.
-
-        Pulse may already have finalized part of the utterance on its own
-        (trailing silence or word count) before this fires; that is fine
-        because ``_latest_transcript`` always holds the full utterance restated
-        so far, not a fragment to append to — see ``_pump_stt_events``.
+        Nothing waits here for the answer — the pump goes straight back to
+        forwarding audio, and ``_pump_stt_events`` dispatches the turn when
+        Pulse's ``from_finalize`` final arrives.
         """
         logger.info("[turn] endpoint — finalizing")
-        self._finalize_ack.clear()
+        self._voiced = False
+        self._silence_s = 0.0
         await self._stt.send(json.dumps({"type": "finalize"}))
-        try:
-            await asyncio.wait_for(self._finalize_ack.wait(), timeout=FINALIZE_TIMEOUT_S)
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"[stt] finalize not acknowledged within {FINALIZE_TIMEOUT_S}s — "
-                "using the transcript collected so far"
-            )
-
-        text = self._latest_transcript.strip()
-        self._latest_transcript = ""
-        logger.info(f"[stt] caller_said: {text}")
-        if text:
-            await self._turns.put(text)
 
     async def _pump_stt_events(self) -> None:
-        """Transcription events → the turn-in-progress text.
+        """Transcription events → turn text.
 
-        Verified live (2026-10-14, looping Lightning's own TTS output back
-        into Pulse): an ``is_final`` transcript is the *complete* utterance
-        restated so far, not a new fragment since the previous final — so each
-        one overwrites ``_latest_transcript`` rather than extending it.
-        Overwriting, not appending, also means a later empty-text final (as
-        Pulse sends to acknowledge ``close_stream``) cannot blank out text a
-        real final already captured. ``_endpoint`` is the only place that
-        turns this into a dispatched turn. Interim (``is_final: false``)
-        events are not acted on; they exist for live captions, which this
-        transport does not render.
+        Verified live (2026-10-14, Lightning's own TTS looped into Pulse): an
+        ``is_final`` transcript covers only the audio since the previous final.
+        Pulse finalizes on its own at short pauses, so a caller who reads an
+        account number, pauses half a second and gives a postcode arrives as
+        two finals inside one turn — the turn is their concatenation. The final
+        answering our ``finalize`` carries ``from_finalize: true`` (with
+        whatever text was still pending, often none) and is what closes the
+        turn. Interim (``is_final: false``) events are not acted on; they
+        exist for live captions, which this transport does not render.
         """
         async for raw in self._stt:
-            try:
-                data = json.loads(raw)
-            except (TypeError, json.JSONDecodeError):
-                logger.warning(f"[stt] non-JSON message: {raw!r}")
+            data = json.loads(raw)
+            if not data.get("is_final"):
                 continue
-
-            is_final = bool(data.get("is_final"))
-            text = (data.get("transcript") or "").strip()
-            if is_final:
-                if text:
-                    self._latest_transcript = text
-                self._finalize_ack.set()
+            text = data["transcript"].strip()
+            if text:
+                self._segments.append(text)
+            if data.get("from_finalize"):
+                turn = " ".join(self._segments)
+                self._segments.clear()
+                logger.info(f"[stt] caller_said: {turn}")
+                if turn:
+                    await self._turns.put(turn)
 
         raise RuntimeError("Pulse STT closed the stream")
 

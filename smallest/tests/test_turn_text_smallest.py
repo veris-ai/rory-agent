@@ -1,12 +1,11 @@
-"""A turn's text is Pulse's latest ``is_final`` transcript, not a concatenation.
+"""A turn's text is every Pulse final since the last turn, closed by the finalize ack.
 
-Verified live (2026-10-14) by looping Lightning's own TTS output back into
-Pulse: each ``is_final`` event restates the *complete* utterance so far, not a
-new fragment since the previous final. Appending finals together — the
-original design, written from the docs before this was checked against the
-real API — would duplicate the caller's words whenever Pulse's own
-trailing-silence or word-count thresholds finalize part of a long utterance
-before this transport's own VAD-driven endpoint does.
+Verified live (2026-10-14, Lightning's own TTS looped into Pulse): an
+``is_final`` transcript covers only the audio since the previous final, and
+Pulse finalizes on its own at a ~0.6 s pause — shorter than END_OF_TURN_S. So
+"My account number is 447219 … and my postcode is 19103." arrives as two
+finals inside one turn, then our ``finalize`` is answered by an empty final
+with ``from_finalize: true``.
 """
 
 from __future__ import annotations
@@ -21,17 +20,14 @@ from rory_smallest import agent
 
 
 class _FakeSTT:
-    """Pulse's WebSocket: a fixed list of events, plus a hook on ``send``."""
+    """Pulse's WebSocket: a fixed list of events; records what is sent."""
 
-    def __init__(self, messages=(), on_send=None):
+    def __init__(self, messages=()):
         self._messages = list(messages)
         self.sent: list[str] = []
-        self._on_send = on_send
 
-    async def send(self, payload: str) -> None:
+    async def send(self, payload) -> None:
         self.sent.append(payload)
-        if self._on_send is not None:
-            self._on_send(payload)
 
     def __aiter__(self):
         return self
@@ -43,53 +39,65 @@ class _FakeSTT:
         return self._messages.pop(0)
 
 
-def _event(is_final: bool, transcript: str) -> str:
-    return json.dumps({"type": "transcription", "is_final": is_final, "transcript": transcript})
+def _final(transcript: str, from_finalize: bool = False) -> str:
+    event = {"type": "transcription", "is_final": True, "transcript": transcript}
+    if from_finalize:
+        event["from_finalize"] = True
+    return json.dumps(event)
 
 
-def test_is_final_events_overwrite_rather_than_append():
+def _interim(transcript: str) -> str:
+    return json.dumps({"type": "transcription", "is_final": False, "transcript": transcript})
+
+
+def _turns(messages) -> list[str]:
     call = agent._Call(SimpleNamespace())
-    call._stt = _FakeSTT([
-        _event(False, "This is"),
-        _event(True, "This is a test"),
-        _event(True, "This is a test of everything"),
-        _event(True, ""),  # e.g. close_stream's empty ack — must not clobber
-    ])
-
+    call._stt = _FakeSTT(messages)
     with pytest.raises(RuntimeError, match="closed the stream"):
         asyncio.run(call._pump_stt_events())
+    turns = []
+    while not call._turns.empty():
+        turns.append(call._turns.get_nowait())
+    return turns
 
-    assert call._latest_transcript == "This is a test of everything"
-    assert call._finalize_ack.is_set()
+
+def test_finals_within_a_turn_are_joined():
+    assert _turns([
+        _interim("My account"),
+        _final(" My account number is 447219"),
+        _interim("and my"),
+        _final(" and my postcode is 19103."),
+        _final("", from_finalize=True),
+    ]) == ["My account number is 447219 and my postcode is 19103."]
 
 
-def test_endpoint_dispatches_the_latest_transcript_and_requests_finalize():
+def test_the_finalize_ack_carries_the_pending_text():
+    assert _turns([_interim("yes"), _final("Yes.", from_finalize=True)]) == ["Yes."]
+
+
+def test_an_automatic_final_does_not_close_the_turn():
+    """Only the ack closes it: text finalized before it waits for the ack."""
+    assert _turns([_final("My account number is")]) == []
+
+
+def test_each_finalize_ack_closes_its_own_turn():
+    """A second pause before the first ack lands is a second turn, not lost words."""
+    assert _turns([
+        _final("Yes.", from_finalize=True),
+        _final("Actually, no.", from_finalize=True),
+    ]) == ["Yes.", "Actually, no."]
+
+
+def test_an_empty_turn_dispatches_nothing():
+    assert _turns([_final("", from_finalize=True)]) == []
+
+
+def test_endpoint_requests_finalize_without_waiting():
     call = agent._Call(SimpleNamespace())
-    call._latest_transcript = "already captured text"
-    call._stt = _FakeSTT(on_send=lambda _payload: call._finalize_ack.set())
+    call._stt = _FakeSTT()
+    call._voiced = True
 
     asyncio.run(call._endpoint())
 
-    assert json.loads(call._stt.sent[0]) == {"type": "finalize"}
-    assert call._turns.get_nowait() == "already captured text"
-    assert call._latest_transcript == ""
-
-
-def test_endpoint_falls_back_to_whatever_arrived_if_finalize_never_acks(monkeypatch):
-    monkeypatch.setattr(agent, "FINALIZE_TIMEOUT_S", 0.05)
-    call = agent._Call(SimpleNamespace())
-    call._latest_transcript = "partial before the timeout"
-    call._stt = _FakeSTT()  # never acknowledges
-
-    asyncio.run(call._endpoint())
-
-    assert call._turns.get_nowait() == "partial before the timeout"
-
-
-def test_endpoint_dispatches_nothing_on_an_empty_turn():
-    call = agent._Call(SimpleNamespace())
-    call._stt = _FakeSTT(on_send=lambda _payload: call._finalize_ack.set())
-
-    asyncio.run(call._endpoint())
-
-    assert call._turns.empty()
+    assert [json.loads(m) for m in call._stt.sent] == [{"type": "finalize"}]
+    assert call._voiced is False
