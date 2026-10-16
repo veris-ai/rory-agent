@@ -54,6 +54,7 @@ COPY polyai/pyproject.toml polyai/README.md ./polyai/
 COPY gpt-live/pyproject.toml gpt-live/README.md ./gpt-live/
 COPY grok-cascade/pyproject.toml grok-cascade/README.md ./grok-cascade/
 COPY smallest/pyproject.toml smallest/README.md ./smallest/
+COPY dialt/pyproject.toml dialt/README.md ./dialt/
 COPY rory_tools ./rory_tools
 COPY polyai/rory_polyai ./polyai/rory_polyai
 RUN uv sync --frozen --no-dev --no-editable --package rory-polyai

@@ -12,6 +12,7 @@ members = [
     "rory-cartesia",
     "rory-core",
     "rory-deepgram",
+    "rory-dialt",
     "rory-elevenlabs",
     "rory-fluxions",
     "rory-gemini-live",
@@ -2523,6 +2524,7 @@ dev = [
     { name = "pytest" },
     { name = "rory-cartesia" },
     { name = "rory-deepgram" },
+    { name = "rory-dialt" },
     { name = "rory-elevenlabs" },
     { name = "rory-fluxions" },
     { name = "rory-gemini-live" },
@@ -2559,6 +2561,7 @@ dev = [
     { name = "pytest", specifier = ">=8.0" },
     { name = "rory-cartesia", editable = "cartesia" },
     { name = "rory-deepgram", editable = "deepgram" },
+    { name = "rory-dialt", editable = "dialt" },
     { name = "rory-elevenlabs", editable = "elevenlabs" },
     { name = "rory-fluxions", editable = "fluxions" },
     { name = "rory-gemini-live", editable = "gemini-live" },
@@ -2595,6 +2598,35 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "rory-core", editable = "." },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+    { name = "websockets", specifier = ">=13" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=8.0" }]
+
+[[package]]
+name = "rory-dialt"
+version = "0.1.0"
+source = { editable = "dialt" }
+dependencies = [
+    { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
+    { name = "fastapi" },
+    { name = "rory-core" },
+    { name = "uvicorn", extra = ["standard"] },
+    { name = "websockets" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "rory-core", editable = "." },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
