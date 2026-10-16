@@ -148,13 +148,18 @@ async def _tools(ws, calls: asyncio.Queue, cancelled: set[str], session: CallSes
                 outcome = "failed"
             elif "error" in result:
                 outcome = "unknown"
-            await ws.send(json.dumps({
-                "type": "tool_result",
-                "id": call["id"],
-                "content": result,
-                "outcome": outcome,
-                "verified": outcome == "succeeded",
-            }, default=str))
+            try:
+                await ws.send(json.dumps({
+                    "type": "tool_result",
+                    "id": call["id"],
+                    "content": result,
+                    "outcome": outcome,
+                    "verified": outcome == "succeeded",
+                }, default=str))
+            except websockets.ConnectionClosedOK:
+                # No more tools may start after provider closure. Stay alive
+                # until downlink drain or actor disconnect ends supervision.
+                await asyncio.Future()
         finally:
             calls.task_done()
 
@@ -200,7 +205,12 @@ async def _downlink(ws, playback: _Playback, calls: asyncio.Queue, cancelled: se
             }
             if "barge_seq" in event:
                 report["barge_seq"] = event["barge_seq"]
-            await ws.send(json.dumps(report))
+            try:
+                await ws.send(json.dumps(report))
+            except websockets.ConnectionClosedOK:
+                # The peer may close while buffered events are still being
+                # consumed. Finish those events and drain surviving audio.
+                pass
         elif kind == "error":
             # Do not log raw server payloads, credentials or conversation data.
             raise RuntimeError("Dialt reported a session error")

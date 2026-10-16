@@ -341,7 +341,8 @@ def test_cancelled_queued_tool_does_not_execute(monkeypatch):
 
 
 @pytest.mark.parametrize("close_code", [1000, 1011])
-def test_clean_provider_close_drains_with_continuous_microphone(monkeypatch, close_code):
+@pytest.mark.parametrize("inflight_tool", [False, True])
+def test_clean_provider_close_drains_with_continuous_microphone(monkeypatch, close_code, inflight_tool):
     async def scenario():
         class StreamingActor(Actor):
             async def receive_bytes(self):
@@ -350,6 +351,59 @@ def test_clean_provider_close_drains_with_continuous_microphone(monkeypatch, clo
 
         actor = StreamingActor()
         output = b"\x01\x00" * 24000
+        started = threading.Event()
+        release = threading.Event()
+
+        def dispatch(*args):
+            started.set()
+            assert release.wait(4)
+            return {"ok": True}
+
+        monkeypatch.setattr(agent, "dispatch", dispatch)
+
+        async def peer(ws):
+            await receive_json(ws)
+            await send(ws, READY)
+            if inflight_tool:
+                await send(ws, {"type": "tool_call", "id": "pending", "name": "get_account", "args": {}})
+                assert await asyncio.to_thread(started.wait, 2)
+            await send(ws, {"type": "turn", "turn_id": "final"})
+            await ws.send(output)
+            await actor.first_audio.wait()
+            await ws.close(code=close_code)
+            await asyncio.sleep(.03)
+            release.set()
+
+        try:
+            if close_code == 1000:
+                await run_peer(monkeypatch, peer, actor)
+                assert b"".join(actor.audio) == output
+            else:
+                from websockets.exceptions import ConnectionClosedError
+                with pytest.raises(ConnectionClosedError):
+                    await run_peer(monkeypatch, peer, actor)
+        finally:
+            release.set()
+
+    asyncio.run(scenario())
+
+
+def test_clean_close_during_playback_receipt_preserves_soft_stop_audio(monkeypatch):
+    from websockets.asyncio.client import ClientConnection
+
+    async def scenario():
+        actor = Actor()
+        output = b"\x01\x00" * 24000
+        receipt_started = asyncio.Event()
+        original_send = ClientConnection.send
+
+        async def delayed_receipt(ws, message, *args, **kwargs):
+            if isinstance(message, str) and json.loads(message).get("event") == "playback_stopped":
+                receipt_started.set()
+                await ws.wait_closed()
+            await original_send(ws, message, *args, **kwargs)
+
+        monkeypatch.setattr(ClientConnection, "send", delayed_receipt)
 
         async def peer(ws):
             await receive_json(ws)
@@ -357,15 +411,12 @@ def test_clean_provider_close_drains_with_continuous_microphone(monkeypatch, clo
             await send(ws, {"type": "turn", "turn_id": "final"})
             await ws.send(output)
             await actor.first_audio.wait()
-            await ws.close(code=close_code)
+            await send(ws, {"type": "interrupted", "turn_id": "final", "clear": False})
+            await receipt_started.wait()
+            await ws.close(code=1000)
 
-        if close_code == 1000:
-            await run_peer(monkeypatch, peer, actor)
-            assert b"".join(actor.audio) == output
-        else:
-            from websockets.exceptions import ConnectionClosedError
-            with pytest.raises(ConnectionClosedError):
-                await run_peer(monkeypatch, peer, actor)
+        await run_peer(monkeypatch, peer, actor)
+        assert b"".join(actor.audio) == output
 
     asyncio.run(scenario())
 

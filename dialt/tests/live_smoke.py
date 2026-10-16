@@ -150,8 +150,9 @@ class Evidence:
         print(self.brain, description, "PASS", flush=True)
 
     async def quiet(self):
+        # A scheduling heuristic, not a response-completion/playback fence.
         await self.until(lambda: self.audio_bytes and time.monotonic() - self.last_audio > 1.5,
-                         "playback drained")
+                         "1.5-second output gap observed")
 
     def result(self, name, predicate):
         return any(e["stage"] == self.stage and e["type"] == "tool_result" and e["name"] == name
@@ -294,6 +295,8 @@ async def run_tier(brain, speech, evidence, typed_business):
                         await evidence.until(lambda: any(e["stage"] == "disable" and e["type"] == "background_speaker_suppression_updated" and e.get("enabled") is False and e.get("source") == "agent" for e in evidence.events), "agent suppression disabled")
                         await asyncio.sleep(2)
                         await evidence.quiet()
+                        # These are session-level observations, not proof that
+                        # the intended explanation response was interrupted.
                         assert any(e["type"] == "interrupted" for e in evidence.events), "No live interruption observed"
                         assert any(e.get("event") == "playback_stopped" for e in evidence.events)
                         assert "set_background_speaker_suppression" not in evidence.tool_names.values()

@@ -108,6 +108,11 @@ confirmation is supplied if the model asks before an action. A timeout or
 unexpected result fails the run; recognition or model variability is not
 silently retried. Both tiers are attempted even when one fails.
 
+The inter-turn wait observes a 1.5-second output gap, not a completion or
+playback-drain fence. Interruption assertions establish session-level event
+presence, not correlation to the intended explanation response. Inspect the
+recorded stage, timing and receipt before making a narrower barge-in claim.
+
 JSON evidence includes source hashes, synthetic transcripts, tool results,
 suppression/playback receipts and disposable backend state. It excludes API
 keys, resume tokens and server-internal configuration. Synthetic caller PCM
