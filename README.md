@@ -45,6 +45,7 @@ wrong.
 | [`gpt-live`](gpt-live/) | OpenAI GPT-Live (`gpt-live-1`) — a full-duplex live model over one websocket per call that delegates tool use to a Responses backend model (`LIVE_BACKEND_MODEL`), Rory's tools answered by the pod as function-call outputs |
 | [`grok-cascade`](grok-cascade/) | xAI Grok streaming STT and TTS around a chat LLM — a hand-rolled cascade, xAI Smart Turn deciding when the caller's turn is over; `GROK_CASCADE_LLM` picks `gpt-4.1-mini` or `grok-4.3` with reasoning off |
 | [`smallest`](smallest/) | Smallest AI's Pulse STT and Lightning TTS around Electron, its own OpenAI-compatible chat model — a hand-rolled cascade, one `SMALLEST_API_KEY` for all three legs, no audio resampling since Pulse and Lightning both run at the actor's 24 kHz |
+| [`dialt`](dialt/) | Dialt's managed voice API over a WebSocket; `DIALT_BRAIN` selects Dialt Fast or Dialt Smart, with Rory's tools dispatched locally |
 
 Each ships as its own image, built from one shared lockfile with
 `uv sync --package`, so a candidate carries only its own voice SDK. Most have
@@ -64,7 +65,7 @@ pipecat/       Pipecat transport
 gemini-live/   Gemini Live transport
 openai-realtime/, deepgram/, elevenlabs/, livekit/, mistral/, fluxions/, huggingface/,
 grok-voice/, vapi/, cartesia/, gradium/, polyai/, gpt-live/,
-grok-cascade/, smallest/  fifteen more transports, same contract
+grok-cascade/, smallest/, dialt/  sixteen more transports, same contract
 ```
 
 A transport is expected to use three things — `SCHEMAS`, `CallSession`, and
