@@ -8,6 +8,7 @@ import asyncio
 import json
 import struct
 import threading
+from types import SimpleNamespace
 
 import pytest
 from starlette.websockets import WebSocketDisconnect
@@ -111,7 +112,7 @@ def test_start_audio_conversion_greeting_and_normal_drain(monkeypatch, brain):
 
 
 @pytest.mark.parametrize("clear", [True, False])
-@pytest.mark.parametrize("identified", [True, False])
+@pytest.mark.parametrize("identified", [True, False, "turn_only"])
 def test_interrupt_discards_or_drains_and_filters_late_audio(monkeypatch, clear, identified):
     async def scenario():
         actor = Actor()
@@ -128,7 +129,9 @@ def test_interrupt_discards_or_drains_and_filters_late_audio(monkeypatch, clear,
             await actor.first_audio.wait()
             interruption = {"type": "interrupted", "clear": clear, "barge_seq": 7}
             if identified:
-                interruption.update(turn_id="old", response_id="r1")
+                interruption.update(turn_id="old")
+                if identified != "turn_only":
+                    interruption["response_id"] = "r1"
             await send(ws, interruption)
             await ws.send(b"\x03\x00" * 480)  # late old-response audio
             report = await receive_json(ws)
@@ -219,7 +222,8 @@ def test_tools_are_sequential_without_blocking_audio_and_report_failures(monkeyp
 
 
 @pytest.mark.parametrize("kind", ["interrupted", "canceled"])
-def test_old_response_stop_preserves_newer_queued_output(monkeypatch, kind):
+@pytest.mark.parametrize("mixed_ids", [False, True, "unknown"])
+def test_old_response_stop_preserves_newer_queued_output(monkeypatch, kind, mixed_ids):
     async def scenario():
         actor = Actor()
         new = b"\x02\x00" * 960
@@ -232,14 +236,24 @@ def test_old_response_stop_preserves_newer_queued_output(monkeypatch, kind):
             await actor.first_audio.wait()
             await send(ws, {"type": "turn", "turn_id": "new", "response_id": "r2"})
             await ws.send(new)
-            await send(ws, {"type": kind, "turn_id": "old", "response_id": "r1", "clear": True})
+            stop = {"type": kind, "turn_id": "old", "clear": True}
+            if mixed_ids == "unknown":
+                stop["turn_id"] = "never-seen"
+            if not mixed_ids:
+                stop["response_id"] = "r1"
+            await send(ws, stop)
             if kind == "interrupted":
                 report = await receive_json(ws)
                 assert report["remaining_ms"] == 0
                 assert "barge_seq" not in report
 
         await run_peer(monkeypatch, peer, actor)
-        assert b"".join(actor.audio).endswith(new)
+        heard = b"".join(actor.audio)
+        assert heard.endswith(new)
+        if mixed_ids == "unknown":
+            assert heard == b"\x01\x00" * 4800 + new
+        else:
+            assert len(heard) < 11520, "Old queued audio was not discarded"
 
     asyncio.run(scenario())
 
@@ -322,5 +336,83 @@ def test_cancelled_queued_tool_does_not_execute(monkeypatch):
         finally:
             release.set()
         assert executed == ["first", "last"]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("close_code", [1000, 1011])
+def test_clean_provider_close_drains_with_continuous_microphone(monkeypatch, close_code):
+    async def scenario():
+        class StreamingActor(Actor):
+            async def receive_bytes(self):
+                await asyncio.sleep(.005)
+                return b"\0" * 240
+
+        actor = StreamingActor()
+        output = b"\x01\x00" * 24000
+
+        async def peer(ws):
+            await receive_json(ws)
+            await send(ws, READY)
+            await send(ws, {"type": "turn", "turn_id": "final"})
+            await ws.send(output)
+            await actor.first_audio.wait()
+            await ws.close(code=close_code)
+
+        if close_code == 1000:
+            await run_peer(monkeypatch, peer, actor)
+            assert b"".join(actor.audio) == output
+        else:
+            from websockets.exceptions import ConnectionClosedError
+            with pytest.raises(ConnectionClosedError):
+                await run_peer(monkeypatch, peer, actor)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure", ["refresh", "response_lost", None])
+def test_committed_write_errors_are_unknown_not_failed(monkeypatch, failure):
+    from rory_tools.session import clients
+
+    account = {"customer_id": "cus_fixture", "name": "Jane Smith",
+               "mailing_address": {"postal_code": "60614"}, "email": "jane@example.invalid"}
+    committed = []
+
+    def write(_customer, updates):
+        committed.append(updates)
+        if failure == "response_lost":
+            raise TimeoutError("fixture response lost after commit")
+        return account
+
+    def refresh(_customer):
+        if failure == "refresh":
+            raise TimeoutError("fixture refresh failed after commit")
+        return account
+
+    monkeypatch.setattr(clients, "_stripe", SimpleNamespace(
+        find_customer_by_account_number=lambda _: account,
+        list_payment_methods=lambda _: [], list_bills=lambda *_args, **_kwargs: [],
+        set_customer_metadata=write, get_customer=refresh,
+    ))
+    monkeypatch.setattr(clients, "_fineract", SimpleNamespace(
+        find_client_by_account_number=lambda _: {"client_id": 1},
+    ))
+
+    async def scenario():
+        async def peer(ws):
+            await receive_json(ws)
+            await send(ws, READY)
+            for call_id, postal, expected in (("wrong", "99999", "failed"), ("right", "60614", "succeeded")):
+                await send(ws, {"type": "tool_call", "id": call_id, "name": "verify_caller",
+                                "args": {"account_number": "4417-88231", "name_on_account": "Jane Smith", "second_factor": postal}})
+                result = await receive_json(ws)
+                assert result["outcome"] == expected
+            await send(ws, {"type": "tool_call", "id": "write", "name": "set_paperless_billing", "args": {"enabled": True}})
+            result = await receive_json(ws)
+            assert committed == [{"paperless": True}]
+            assert result["outcome"] == ("unknown" if failure else "succeeded")
+            assert result["verified"] is (failure is None)
+
+        await run_peer(monkeypatch, peer, Actor())
 
     asyncio.run(scenario())

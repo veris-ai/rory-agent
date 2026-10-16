@@ -106,16 +106,24 @@ class _Playback:
 
 async def _uplink(actor: WebSocket, ws) -> None:
     state = None
+    provider_closed = False
     try:
         while True:
             audio = await actor.receive_bytes()
+            if provider_closed:
+                continue
             if len(audio) % 2:
                 raise ValueError("voice_ws requires complete PCM16 samples")
             # Keep resampler history across frames; resetting it causes clicks
             # and loses samples at every actor packet boundary.
             converted, state = audioop.ratecv(audio, 2, 1, 24000, 16000, state)
             if converted:
-                await ws.send(converted)
+                try:
+                    await ws.send(converted)
+                except websockets.ConnectionClosedOK:
+                    # Keep watching actor disconnects, but let the downlink
+                    # finish draining queued audio before supervision exits.
+                    provider_closed = True
     except WebSocketDisconnect:
         return
 
@@ -131,15 +139,21 @@ async def _tools(ws, calls: asyncio.Queue, cancelled: set[str], session: CallSes
             # Never start queued cancelled work or replay an uncertain write.
             if call["id"] in cancelled:
                 continue
-            # A completed lookup may legitimately report a negative answer.
-            # Explicit failed actions must never be announced as successful.
-            failed = "error" in result or result.get("verified") is False or result.get("paid") is False
+            # Generic errors cannot prove a write failed: its response or a
+            # post-write refresh may have failed after the write committed.
+            # Only explicit negative results establish failure. Preserve the
+            # shared result verbatim so the model still sees any refusal.
+            outcome = "succeeded"
+            if result.get("verified") is False or result.get("paid") is False:
+                outcome = "failed"
+            elif "error" in result:
+                outcome = "unknown"
             await ws.send(json.dumps({
                 "type": "tool_result",
                 "id": call["id"],
                 "content": result,
-                "outcome": "failed" if failed else "succeeded",
-                "verified": not failed,
+                "outcome": outcome,
+                "verified": outcome == "succeeded",
             }, default=str))
         finally:
             calls.task_done()
@@ -147,6 +161,7 @@ async def _tools(ws, calls: asyncio.Queue, cancelled: set[str], session: CallSes
 
 async def _downlink(ws, playback: _Playback, calls: asyncio.Queue, cancelled: set[str]) -> None:
     response = ""
+    responses_by_turn: dict[str, str] = {}
     suppressed: set[str] = set()
     async for raw in ws:
         if isinstance(raw, bytes):
@@ -157,21 +172,23 @@ async def _downlink(ws, playback: _Playback, calls: asyncio.Queue, cancelled: se
         kind = event.get("type")
         if kind == "turn":
             response = event.get("response_id") or event["turn_id"]
+            responses_by_turn[event["turn_id"]] = response
         elif kind == "tool_call":
             # A dedicated sequential worker keeps audio and interruption
             # receipts flowing even while a vendor lookup blocks.
             calls.put_nowait(event)
         elif kind == "tool_cancel":
             cancelled.add(event["id"])
-        elif kind == "canceled":
-            # Retracted speculative output is not a completed spoken turn.
-            # Legacy events may omit both IDs and refer to current output.
-            target = event.get("response_id") or event.get("turn_id") or response
+        elif kind in {"canceled", "interrupted"}:
+            # Segment IDs and logical response IDs are different namespaces.
+            # An unknown explicit old ID must not stop the current response;
+            # only legacy events omitting both IDs refer to current output.
+            turn = event.get("turn_id")
+            target = event.get("response_id") or responses_by_turn.get(turn, turn) or response
             suppressed.add(target)
-            playback.clear(target)
-        elif kind == "interrupted":
-            target = event.get("response_id") or event.get("turn_id") or response
-            suppressed.add(target)
+            if kind == "canceled":
+                playback.clear(target)
+                continue
             # Soft stops let already queued audio drain. Hard stops discard
             # only the interrupted response, not a newer response's output.
             discarded_ms = playback.clear(target) if event.get("clear") else 0

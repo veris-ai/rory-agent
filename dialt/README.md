@@ -45,6 +45,13 @@ replay, to avoid repeating account or payment operations.
 Cancelled tools are skipped if still queued. An already running blocking
 vendor request cannot be undone; its result is not sent after cancellation.
 
+Tool results preserve the shared payload. Explicit negative verification or
+payment results report `failed`; successful results report `succeeded` and
+`verified: true`. Generic errors report `unknown`, unverified: a write may have
+committed before its response or subsequent refresh failed. This conservative
+mapping also leaves generic vendor refusals unverified rather than guessing
+from exception text whether a write happened.
+
 ## Background speaker suppression
 
 This transport requests agent control **on**, with suppression initially
@@ -72,3 +79,40 @@ not guarantee better benchmark results.
 uv sync
 uv run pytest dialt/tests -q
 ```
+
+### Opt-in live checks (billable)
+
+With `DIALT_API_KEY` set, the following starts finite loopback ASGI and HTTP
+fixture servers, calls the actual `/health` and `/voice` routes, and connects
+through a transparent observing relay to production Dialt. It runs both tiers
+by default (`--brains fast` or `--brains smart` selects one). It never changes
+Rory's prompt, tools, dispatcher or vendor clients. All Stripe/Fineract URLs
+and credentials are overwritten with disposable local fixtures; no real
+financial writes occur. The fixtures implement only this scenario, **not the
+complete hosted Veris twin benchmark**.
+
+```bash
+uv sync --package rory-dialt --no-dev --group test
+uv run --no-sync python dialt/tests/live_smoke.py --output /tmp/dialt-voice.json
+
+# Separately labelled diagnostic: bypass ASR for business turns using the
+# public acknowledged user-text injection API. Suppression requests and
+# barge-in still use audio through /voice. This is NOT full voice E2E.
+uv run --no-sync python dialt/tests/live_smoke.py --typed-business --output /tmp/dialt-typed.json
+```
+
+The scenario checks rejected and accepted identity, account lookup, paperless
+billing, a declined payment followed by an explicitly authorized successful
+payment, interruption and agent-controlled suppression on/off. One spoken
+confirmation is supplied if the model asks before an action. A timeout or
+unexpected result fails the run; recognition or model variability is not
+silently retried. Both tiers are attempted even when one fails.
+
+JSON evidence includes source hashes, synthetic transcripts, tool results,
+suppression/playback receipts and disposable backend state. It excludes API
+keys, resume tokens and server-internal configuration. Synthetic caller PCM
+is cached in `/tmp/rory-dialt-live-audio` (override with `--audio-cache`) for
+repeatability and to avoid paying to regenerate it on every run. Keep evidence
+and cached audio outside the repository. Local tests additionally force clean
+and abnormal closure, mixed response/turn identifiers, queued tool cancellation
+and uncertain writes; these deterministic peer tests are not production proof.
