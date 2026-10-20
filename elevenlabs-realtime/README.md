@@ -54,10 +54,11 @@ current frozen-clock date, tools, and audio configuration at
 subprotocol as the documented browser SDK flow. The initial token-scoped
 configuration is authoritative; a dashboard agent ID is unnecessary.
 
-Rory greets first through `response.create`. Server VAD uses 800 ms of
-end-of-turn silence and interrupts responses when the caller speaks. The
-bridge streams audio deltas immediately and sends `conversation.item.truncate`
-at the amount forwarded when the caller interrupts an active response.
+Rory greets first through `response.create`. ElevenLabs requires semantic VAD;
+this transport uses medium eagerness and interrupts responses when the caller
+speaks. The bridge streams audio deltas immediately and sends
+`conversation.item.truncate` at the amount forwarded when the caller interrupts
+an active response.
 
 Tools run sequentially through the shared dispatcher on worker threads, after
 `response.done` confirms a completed response. Cancelled responses execute no

@@ -76,7 +76,7 @@ def test_mint_scopes_the_model_prompt_tools_and_audio_to_the_call(monkeypatch, m
     assert config["audio"]["input"]["format"] == {"type": "audio/pcm", "rate": 24000}
     assert config["audio"]["output"] == {"format": {"type": "audio/pcm"}, "voice": agent.REALTIME_VOICE}
     assert config["audio"]["input"]["turn_detection"] == {
-        "type": "server_vad", "silence_duration_ms": 800,
+        "type": "semantic_vad", "eagerness": "medium",
         "create_response": True, "interrupt_response": True,
     }
     assert body["expires_after"] == {"anchor": "created_at", "seconds": 600}
@@ -87,8 +87,9 @@ def test_mint_failure_propagates(monkeypatch):
     transport = httpx.MockTransport(lambda request: httpx.Response(403, json={"detail": "Unavailable"}))
     monkeypatch.setattr(agent.httpx, "AsyncClient", lambda: client_class(transport=transport))
     monkeypatch.setenv("ELEVENLABS_API_KEY", "test_key")
-    with pytest.raises(httpx.HTTPStatusError, match="403"):
+    with pytest.raises(httpx.HTTPStatusError, match="403") as error:
         asyncio.run(agent._create_client_secret())
+    assert "Unavailable" in "\n".join(error.value.__notes__)
 
 
 @pytest.mark.parametrize("missing", ["ELEVENLABS_API_KEY", "STRIPE_API_KEY"])

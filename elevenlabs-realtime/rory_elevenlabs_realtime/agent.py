@@ -44,8 +44,8 @@ def _session_config() -> dict:
                 "format": {"type": "audio/pcm", "rate": SAMPLE_RATE_HZ},
                 "transcription": {"language": "en"},
                 "turn_detection": {
-                    "type": "server_vad",
-                    "silence_duration_ms": 800,
+                    "type": "semantic_vad",
+                    "eagerness": "medium",
                     "create_response": True,
                     "interrupt_response": True,
                 },
@@ -68,7 +68,11 @@ async def _create_client_secret() -> str:
                 "expires_after": {"anchor": "created_at", "seconds": 600},
             },
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            exc.add_note(f"ElevenLabs Realtime response: {response.text}")
+            raise
         return response.json()["value"]
 
 
