@@ -35,6 +35,7 @@ WORKDIR /agent
 COPY pyproject.toml uv.lock README.md ./
 COPY pipecat/pyproject.toml pipecat/README.md ./pipecat/
 COPY gemini-live/pyproject.toml gemini-live/README.md ./gemini-live/
+COPY gemini-live-xt-thinking/pyproject.toml gemini-live-xt-thinking/README.md ./gemini-live-xt-thinking/
 COPY elevenlabs/pyproject.toml elevenlabs/README.md ./elevenlabs/
 COPY elevenlabs-realtime/pyproject.toml elevenlabs-realtime/README.md ./elevenlabs-realtime/
 COPY deepgram/pyproject.toml deepgram/README.md ./deepgram/

@@ -30,6 +30,7 @@ wrong.
 | --- | --- |
 | [`pipecat`](pipecat/) | Pipecat with Deepgram, OpenAI, and ElevenLabs — a cascaded STT → LLM → TTS pipeline |
 | [`gemini-live`](gemini-live/) | Gemini Live API — a single speech-to-speech model, no STT or TTS of its own; `GEMINI_LIVE_MODEL` picks 2.5 native audio or 3.1 Flash Live |
+| [`gemini-live-xt-thinking`](gemini-live-xt-thinking/) | Gemini 3.8 Live Extended Thinking — the `gemini-live` transport with a pinned thinking level (`GEMINI_THINKING_LEVEL`) and non-blocking tools, which this model requires |
 | [`openai-realtime`](openai-realtime/) | OpenAI Realtime API — speech-to-speech over a websocket; `REALTIME_MODEL` picks the full or mini model |
 | [`deepgram`](deepgram/) | Deepgram Voice Agent API — listen, think and speak in one vendor socket |
 | [`elevenlabs`](elevenlabs/) | ElevenLabs Conversational AI — a platform-hosted agent with Rory's tools registered as client tools |
@@ -63,6 +64,7 @@ rory_tools/    the 16 tools, their implementations, the vendor clients,
                parity checks every transport runs against itself
 pipecat/       Pipecat transport
 gemini-live/   Gemini Live transport
+gemini-live-xt-thinking/   Gemini 3.8 Live Extended Thinking (copy of gemini-live)
 openai-realtime/, deepgram/, elevenlabs/, elevenlabs-realtime/, livekit/, mistral/, fluxions/, huggingface/,
 grok-voice/, vapi/, cartesia/, gradium/, polyai/, gpt-live/,
 grok-cascade/, smallest/  sixteen more transports, same contract

@@ -16,6 +16,7 @@ members = [
     "rory-elevenlabs-realtime",
     "rory-fluxions",
     "rory-gemini-live",
+    "rory-gemini-live-xt-thinking",
     "rory-gpt-live",
     "rory-gradium",
     "rory-grok-cascade",
@@ -2528,6 +2529,7 @@ dev = [
     { name = "rory-elevenlabs-realtime" },
     { name = "rory-fluxions" },
     { name = "rory-gemini-live" },
+    { name = "rory-gemini-live-xt-thinking" },
     { name = "rory-gpt-live" },
     { name = "rory-gradium" },
     { name = "rory-grok-cascade" },
@@ -2565,6 +2567,7 @@ dev = [
     { name = "rory-elevenlabs-realtime", editable = "elevenlabs-realtime" },
     { name = "rory-fluxions", editable = "fluxions" },
     { name = "rory-gemini-live", editable = "gemini-live" },
+    { name = "rory-gemini-live-xt-thinking", editable = "gemini-live-xt-thinking" },
     { name = "rory-gpt-live", editable = "gpt-live" },
     { name = "rory-gradium", editable = "gradium" },
     { name = "rory-grok-cascade", editable = "grok-cascade" },
@@ -2700,6 +2703,35 @@ dev = [{ name = "pytest", specifier = ">=8.0" }]
 name = "rory-gemini-live"
 version = "0.1.0"
 source = { editable = "gemini-live" }
+dependencies = [
+    { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
+    { name = "fastapi" },
+    { name = "google-genai" },
+    { name = "rory-core" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "google-genai", specifier = ">=1.0.0" },
+    { name = "rory-core", editable = "." },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=8.0" }]
+
+[[package]]
+name = "rory-gemini-live-xt-thinking"
+version = "0.1.0"
+source = { editable = "gemini-live-xt-thinking" }
 dependencies = [
     { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
     { name = "fastapi" },
