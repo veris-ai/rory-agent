@@ -54,9 +54,11 @@ current frozen-clock date, tools, and audio configuration at
 subprotocol as the documented browser SDK flow. The initial token-scoped
 configuration is authoritative; a dashboard agent ID is unnecessary.
 
-Rory greets first through `response.create`. ElevenLabs requires semantic VAD;
-this transport uses medium eagerness and interrupts responses when the caller
-speaks. The bridge streams audio deltas immediately and sends
+Rory greets first by adding a user text item requesting the shared greeting,
+then sending `response.create`; ElevenLabs needs conversation input before it
+will generate a reply. ElevenLabs requires semantic VAD; this transport uses
+medium eagerness and interrupts responses when the caller speaks. The bridge
+streams audio deltas immediately and sends
 `conversation.item.truncate` at the amount forwarded when the caller interrupts
 an active response.
 

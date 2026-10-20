@@ -89,15 +89,22 @@ async def run_voice_ws_bot(actor_ws: WebSocket) -> None:
         if event["type"] != "session.created":
             raise RuntimeError(f"ElevenLabs Realtime session failed: {event}")
         logger.info(f"[voice] ElevenLabs Realtime connected model={REALTIME_MODEL} voice={REALTIME_VOICE}")
+        # ElevenLabs needs conversation input before it will generate a reply.
         await realtime_ws.send(json.dumps({
-            "type": "response.create",
-            "response": {
-                "instructions": (
-                    "Open the call by greeting the caller now. Say exactly: "
-                    f'"{GREETING}" Then stop and wait for the caller to respond.'
-                ),
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": (
+                        "The call just connected. Greet the caller with exactly: "
+                        f'"{GREETING}" Then stop and wait for the caller to respond.'
+                    ),
+                }],
             },
         }))
+        await realtime_ws.send(json.dumps({"type": "response.create"}))
 
         up = asyncio.create_task(_pump_actor_to_realtime(actor_ws, realtime_ws))
         down = asyncio.create_task(_pump_realtime_to_actor(realtime_ws, actor_ws, session_state))

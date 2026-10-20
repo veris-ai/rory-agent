@@ -150,8 +150,14 @@ def test_greeting_authentication_and_pump_cleanup(monkeypatch, failed):
     assert connected == [(agent.REALTIME_URL, {
         "subprotocols": ["realtime", "openai-insecure-api-key.ek_per_call"],
     })] * 2
-    assert all(message["type"] == "response.create" for message in realtime.sent)
-    assert GREETING in realtime.sent[0]["response"]["instructions"]
+    assert [message["type"] for message in realtime.sent] == [
+        "conversation.item.create", "response.create",
+    ] * 2
+    greeting = realtime.sent[0]["item"]
+    assert greeting["type"] == "message"
+    assert greeting["role"] == "user"
+    assert greeting["content"][0]["type"] == "input_text"
+    assert GREETING in greeting["content"][0]["text"]
 
 
 def test_session_creation_error_propagates_before_greeting(monkeypatch):
@@ -207,7 +213,10 @@ def test_call_bridges_a_real_local_websocket(monkeypatch):
             assert "openai-insecure-api-key.ek_loopback" in socket.request.headers["Sec-WebSocket-Protocol"]
             await socket.send(json.dumps({"type": "session.created"}))
             greeting = json.loads(await socket.recv())
-            assert GREETING in greeting["response"]["instructions"]
+            assert greeting["type"] == "conversation.item.create"
+            assert greeting["item"]["role"] == "user"
+            assert GREETING in greeting["item"]["content"][0]["text"]
+            assert json.loads(await socket.recv()) == {"type": "response.create"}
             audio = json.loads(await socket.recv())
             assert audio["type"] == "input_audio_buffer.append"
             assert base64.b64decode(audio["audio"]) == caller_audio
