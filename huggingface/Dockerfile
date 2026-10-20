@@ -21,6 +21,7 @@ COPY pyproject.toml uv.lock README.md ./
 COPY pipecat/pyproject.toml pipecat/README.md ./pipecat/
 COPY gemini-live/pyproject.toml gemini-live/README.md ./gemini-live/
 COPY elevenlabs/pyproject.toml elevenlabs/README.md ./elevenlabs/
+COPY elevenlabs-realtime/pyproject.toml elevenlabs-realtime/README.md ./elevenlabs-realtime/
 COPY deepgram/pyproject.toml deepgram/README.md ./deepgram/
 COPY openai-realtime/pyproject.toml openai-realtime/README.md ./openai-realtime/
 COPY livekit/pyproject.toml livekit/README.md ./livekit/

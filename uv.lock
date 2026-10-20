@@ -13,6 +13,7 @@ members = [
     "rory-core",
     "rory-deepgram",
     "rory-elevenlabs",
+    "rory-elevenlabs-realtime",
     "rory-fluxions",
     "rory-gemini-live",
     "rory-gpt-live",
@@ -2524,6 +2525,7 @@ dev = [
     { name = "rory-cartesia" },
     { name = "rory-deepgram" },
     { name = "rory-elevenlabs" },
+    { name = "rory-elevenlabs-realtime" },
     { name = "rory-fluxions" },
     { name = "rory-gemini-live" },
     { name = "rory-gpt-live" },
@@ -2560,6 +2562,7 @@ dev = [
     { name = "rory-cartesia", editable = "cartesia" },
     { name = "rory-deepgram", editable = "deepgram" },
     { name = "rory-elevenlabs", editable = "elevenlabs" },
+    { name = "rory-elevenlabs-realtime", editable = "elevenlabs-realtime" },
     { name = "rory-fluxions", editable = "fluxions" },
     { name = "rory-gemini-live", editable = "gemini-live" },
     { name = "rory-gpt-live", editable = "gpt-live" },
@@ -2625,6 +2628,35 @@ dev = [
 requires-dist = [
     { name = "elevenlabs", specifier = ">=2.50.0" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "rory-core", editable = "." },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+    { name = "websockets", specifier = ">=13" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=8.0" }]
+
+[[package]]
+name = "rory-elevenlabs-realtime"
+version = "0.1.0"
+source = { editable = "elevenlabs-realtime" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "rory-core" },
+    { name = "uvicorn", extra = ["standard"] },
+    { name = "websockets" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "rory-core", editable = "." },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
     { name = "websockets", specifier = ">=13" },

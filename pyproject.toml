@@ -16,12 +16,13 @@ vad = ["onnxruntime>=1.18", "numpy>=2.0", "audioop-lts; python_version >= '3.13'
 
 [dependency-groups]
 test = ["pytest>=8.0"]
-dev = [{ include-group = "test" }, "rory-pipecat", "rory-gemini-live", "rory-elevenlabs", "rory-deepgram", "rory-openai-realtime", "rory-livekit", "rory-mistral", "rory-fluxions", "rory-huggingface", "rory-grok-voice", "rory-vapi", "rory-cartesia", "rory-gradium", "rory-polyai", "rory-gpt-live", "rory-grok-cascade", "rory-smallest"]
+dev = [{ include-group = "test" }, "rory-pipecat", "rory-gemini-live", "rory-elevenlabs", "rory-elevenlabs-realtime", "rory-deepgram", "rory-openai-realtime", "rory-livekit", "rory-mistral", "rory-fluxions", "rory-huggingface", "rory-grok-voice", "rory-vapi", "rory-cartesia", "rory-gradium", "rory-polyai", "rory-gpt-live", "rory-grok-cascade", "rory-smallest"]
 
 [tool.uv.sources]
 rory-pipecat = { workspace = true }
 rory-gemini-live = { workspace = true }
 rory-elevenlabs = { workspace = true }
+rory-elevenlabs-realtime = { workspace = true }
 rory-deepgram = { workspace = true }
 rory-openai-realtime = { workspace = true }
 rory-livekit = { workspace = true }
@@ -38,7 +39,7 @@ rory-grok-cascade = { workspace = true }
 rory-smallest = { workspace = true }
 
 [tool.uv.workspace]
-members = ["pipecat", "gemini-live", "elevenlabs", "deepgram", "openai-realtime", "livekit", "mistral", "fluxions", "huggingface", "grok-voice", "vapi", "cartesia", "gradium", "polyai", "gpt-live", "grok-cascade", "smallest"]
+members = ["pipecat", "gemini-live", "elevenlabs", "elevenlabs-realtime", "deepgram", "openai-realtime", "livekit", "mistral", "fluxions", "huggingface", "grok-voice", "vapi", "cartesia", "gradium", "polyai", "gpt-live", "grok-cascade", "smallest"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["rory_tools"]
@@ -52,4 +53,4 @@ pythonpath = ["."]
 # The shared suite plus each transport's own parity run. Inside an image only
 # one transport is installed and it runs its own directory; from the dev
 # workspace every transport is present, so run all of them.
-testpaths = ["tests", "pipecat/tests", "gemini-live/tests", "elevenlabs/tests", "deepgram/tests", "openai-realtime/tests", "livekit/tests", "mistral/tests", "fluxions/tests", "huggingface/tests", "grok-voice/tests", "vapi/tests", "cartesia/tests", "gradium/tests", "polyai/tests", "gpt-live/tests", "grok-cascade/tests", "smallest/tests"]
+testpaths = ["tests", "pipecat/tests", "gemini-live/tests", "elevenlabs/tests", "elevenlabs-realtime/tests", "deepgram/tests", "openai-realtime/tests", "livekit/tests", "mistral/tests", "fluxions/tests", "huggingface/tests", "grok-voice/tests", "vapi/tests", "cartesia/tests", "gradium/tests", "polyai/tests", "gpt-live/tests", "grok-cascade/tests", "smallest/tests"]

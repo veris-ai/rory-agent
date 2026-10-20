@@ -1,0 +1,36 @@
+# Build from the repository root:
+# docker build --platform linux/amd64 -f elevenlabs-realtime/Dockerfile -t rory-elevenlabs-realtime .
+# Copy every workspace manifest for uv validation, but install only this transport.
+
+FROM python:3.12-slim
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /agent
+
+COPY pyproject.toml uv.lock README.md ./
+COPY pipecat/pyproject.toml pipecat/README.md ./pipecat/
+COPY gemini-live/pyproject.toml gemini-live/README.md ./gemini-live/
+COPY elevenlabs/pyproject.toml elevenlabs/README.md ./elevenlabs/
+COPY elevenlabs-realtime/pyproject.toml elevenlabs-realtime/README.md ./elevenlabs-realtime/
+COPY deepgram/pyproject.toml deepgram/README.md ./deepgram/
+COPY openai-realtime/pyproject.toml openai-realtime/README.md ./openai-realtime/
+COPY livekit/pyproject.toml livekit/README.md ./livekit/
+COPY mistral/pyproject.toml mistral/README.md ./mistral/
+COPY fluxions/pyproject.toml fluxions/README.md ./fluxions/
+COPY huggingface/pyproject.toml huggingface/README.md ./huggingface/
+COPY grok-voice/pyproject.toml grok-voice/README.md ./grok-voice/
+COPY vapi/pyproject.toml vapi/README.md ./vapi/
+COPY cartesia/pyproject.toml cartesia/README.md ./cartesia/
+COPY gradium/pyproject.toml gradium/README.md ./gradium/
+COPY polyai/pyproject.toml polyai/README.md ./polyai/
+COPY gpt-live/pyproject.toml gpt-live/README.md ./gpt-live/
+COPY grok-cascade/pyproject.toml grok-cascade/README.md ./grok-cascade/
+COPY smallest/pyproject.toml smallest/README.md ./smallest/
+COPY rory_tools ./rory_tools
+COPY elevenlabs-realtime/rory_elevenlabs_realtime ./elevenlabs-realtime/rory_elevenlabs_realtime
+RUN uv sync --frozen --no-dev --no-editable --package rory-elevenlabs-realtime
+RUN uv run --no-sync python -c "import rory_elevenlabs_realtime.web; from rory_tools.prompt import load_agent_prompt; assert load_agent_prompt()"
+
+EXPOSE 8008
+CMD ["uv", "run", "--no-sync", "uvicorn", "rory_elevenlabs_realtime.web:app", "--host", "0.0.0.0", "--port", "8008"]

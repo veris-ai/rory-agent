@@ -33,6 +33,7 @@ wrong.
 | [`openai-realtime`](openai-realtime/) | OpenAI Realtime API — speech-to-speech over a websocket; `REALTIME_MODEL` picks the full or mini model |
 | [`deepgram`](deepgram/) | Deepgram Voice Agent API — listen, think and speak in one vendor socket |
 | [`elevenlabs`](elevenlabs/) | ElevenLabs Conversational AI — a platform-hosted agent with Rory's tools registered as client tools |
+| [`elevenlabs-realtime`](elevenlabs-realtime/) | Eleven Realtime API — an OpenAI-compatible WebSocket with Rory's shared tools; `ELEVENLABS_REALTIME_MODEL` selects v1 Max (default) or v1 Mini |
 | [`livekit`](livekit/) | LiveKit Agents over a LiveKit server running inside the image — cascaded, with framework-native function calling |
 | [`mistral`](mistral/) | Mistral Voxtral realtime STT and TTS around a Mistral chat model — a hand-rolled cascade |
 | [`fluxions`](fluxions/) | Fluxions voice-agent API — ASR, a vLLM-served chat model and VUI TTS in one realtime websocket, with Rory's tools as bring-your-own functions |
@@ -62,9 +63,9 @@ rory_tools/    the 16 tools, their implementations, the vendor clients,
                parity checks every transport runs against itself
 pipecat/       Pipecat transport
 gemini-live/   Gemini Live transport
-openai-realtime/, deepgram/, elevenlabs/, livekit/, mistral/, fluxions/, huggingface/,
+openai-realtime/, deepgram/, elevenlabs/, elevenlabs-realtime/, livekit/, mistral/, fluxions/, huggingface/,
 grok-voice/, vapi/, cartesia/, gradium/, polyai/, gpt-live/,
-grok-cascade/, smallest/  fifteen more transports, same contract
+grok-cascade/, smallest/  sixteen more transports, same contract
 ```
 
 A transport is expected to use three things — `SCHEMAS`, `CallSession`, and
