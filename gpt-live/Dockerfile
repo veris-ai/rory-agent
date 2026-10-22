@@ -38,6 +38,7 @@ COPY gpt-live/pyproject.toml gpt-live/README.md ./gpt-live/
 COPY grok-cascade/pyproject.toml grok-cascade/README.md ./grok-cascade/
 COPY smallest/pyproject.toml smallest/README.md ./smallest/
 COPY dialt/pyproject.toml dialt/README.md ./dialt/
+COPY hydra/pyproject.toml hydra/README.md ./hydra/
 COPY rory_tools ./rory_tools
 COPY gpt-live/rory_gpt_live ./gpt-live/rory_gpt_live
 RUN uv sync --frozen --no-dev --no-editable --package rory-gpt-live
