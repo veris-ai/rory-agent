@@ -19,7 +19,9 @@ FROM python:3.12-slim
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-ADD --chmod=755 https://github.com/cloudflare/cloudflared/releases/download/2026.6.0/cloudflared-linux-amd64 /usr/local/bin/cloudflared
+ADD https://github.com/cloudflare/cloudflared/releases/download/2026.6.0/cloudflared-linux-amd64 /usr/local/bin/cloudflared
+# A RUN chmod rather than ADD --chmod: the legacy builder ignores --chmod on a URL source.
+RUN chmod 755 /usr/local/bin/cloudflared
 
 WORKDIR /agent
 
