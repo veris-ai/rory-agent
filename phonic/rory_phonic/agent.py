@@ -136,6 +136,11 @@ async def _pump_actor_to_phonic(actor_ws: WebSocket, ph_ws) -> None:
             f"[a->ph] actor disconnected after {n_frames} frames "
             f"({n_bytes} bytes): code={getattr(exc, 'code', '?')}"
         )
+    except websockets.ConnectionClosed as exc:
+        logger.info(
+            f"[a->ph] Phonic closed the conversation during the call after {n_frames} frames "
+            f"({n_bytes} bytes): code={exc.code} reason={exc.reason}"
+        )
     except KeyError as exc:
         # Starlette raises KeyError('bytes') when it got a text frame instead of
         # a binary one — a protocol mismatch on the actor side, not a bug here.
