@@ -48,6 +48,7 @@ wrong.
 | [`grok-cascade`](grok-cascade/) | xAI Grok streaming STT and TTS around a chat LLM — a hand-rolled cascade, xAI Smart Turn deciding when the caller's turn is over; `GROK_CASCADE_LLM` picks `gpt-4.1-mini` or `grok-4.3` with reasoning off |
 | [`smallest`](smallest/) | Smallest AI's Pulse STT and Lightning TTS around Electron, its own OpenAI-compatible chat model — a hand-rolled cascade, one `SMALLEST_API_KEY` for all three legs, no audio resampling since Pulse and Lightning both run at the actor's 24 kHz |
 | [`dialt`](dialt/) | Dialt's managed voice API over a WebSocket; `DIALT_BRAIN` selects Dialt Fast or Dialt Smart, with Rory's tools dispatched locally |
+| [`plivo`](plivo/) | Plivo — the Pipecat cascade answering a real Plivo call over Plivo Audio Streaming (8 kHz μ-law), the caller joining as a per-pod Plivo WebRTC endpoint, no phone number |
 
 Each ships as its own image, built from one shared lockfile with
 `uv sync --package`, so a candidate carries only its own voice SDK. Most have
@@ -68,7 +69,7 @@ gemini-live/   Gemini Live transport
 gemini-live-xt-thinking/   Gemini 3.8 Live Extended Thinking (copy of gemini-live)
 openai-realtime/, deepgram/, elevenlabs/, elevenlabs-realtime/, livekit/, mistral/, fluxions/, huggingface/,
 grok-voice/, vapi/, cartesia/, gradium/, polyai/, gpt-live/,
-grok-cascade/, smallest/, dialt/  seventeen more transports, same contract
+grok-cascade/, smallest/, dialt/, plivo/  eighteen more transports, same contract
 ```
 
 A transport is expected to use three things — `SCHEMAS`, `CallSession`, and
