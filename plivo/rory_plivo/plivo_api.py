@@ -17,9 +17,14 @@ from dataclasses import dataclass
 import httpx
 from loguru import logger
 
-# Plivo validates answer_url when the Application is created. A cloudflared
-# quick tunnel's hostname can take a few seconds to resolve after the tunnel
-# reports ready, and Plivo answers 400 until then.
+# A cloudflared quick tunnel's hostname takes a few seconds to resolve after
+# the tunnel reports ready. Plivo must not look it up before then: its resolver
+# caches the miss, and the call's answer_url fetch later fails with "Error
+# Reaching Answer URL" (the call is answered 486 Busy Here). So provisioning
+# first waits until public resolvers answer for the hostname.
+PUBLIC_RESOLVERS = ("https://cloudflare-dns.com/dns-query", "https://dns.google/resolve")
+DNS_WAIT_S = 120.0
+# Plivo validates answer_url when the Application is created.
 APP_CREATE_ATTEMPTS = 20
 APP_CREATE_RETRY_S = 3.0
 # A fresh endpoint's SIP credentials are not accepted for a few seconds.
@@ -43,7 +48,25 @@ def _client() -> httpx.AsyncClient:
     )
 
 
+async def wait_for_public_dns(host: str) -> None:
+    """Block until every public resolver returns an A record for ``host``."""
+    deadline = asyncio.get_running_loop().time() + DNS_WAIT_S
+    async with httpx.AsyncClient(timeout=10, headers={"accept": "application/dns-json"}) as dns:
+        while True:
+            answers = [
+                (await dns.get(resolver, params={"name": host, "type": "A"})).json().get("Answer")
+                for resolver in PUBLIC_RESOLVERS
+            ]
+            if all(answers):
+                logger.info(f"[plivo] {host} resolves publicly")
+                return
+            if asyncio.get_running_loop().time() > deadline:
+                raise RuntimeError(f"{host} still not resolvable by {PUBLIC_RESOLVERS} after {DNS_WAIT_S:.0f}s")
+            await asyncio.sleep(2)
+
+
 async def provision(answer_url: str) -> Provisioned:
+    await wait_for_public_dns(httpx.URL(answer_url).host)
     tag = uuid.uuid4().hex[:10]
     async with _client() as api:
         for attempt in range(1, APP_CREATE_ATTEMPTS + 1):
