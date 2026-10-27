@@ -27,6 +27,7 @@ members = [
     "rory-mistral",
     "rory-openai-realtime",
     "rory-pipecat",
+    "rory-plivo",
     "rory-polyai",
     "rory-smallest",
     "rory-vapi",
@@ -2541,6 +2542,7 @@ dev = [
     { name = "rory-mistral" },
     { name = "rory-openai-realtime" },
     { name = "rory-pipecat" },
+    { name = "rory-plivo" },
     { name = "rory-polyai" },
     { name = "rory-smallest" },
     { name = "rory-vapi" },
@@ -2580,6 +2582,7 @@ dev = [
     { name = "rory-mistral", editable = "mistral" },
     { name = "rory-openai-realtime", editable = "openai-realtime" },
     { name = "rory-pipecat", editable = "pipecat" },
+    { name = "rory-plivo", editable = "plivo" },
     { name = "rory-polyai", editable = "polyai" },
     { name = "rory-smallest", editable = "smallest" },
     { name = "rory-vapi", editable = "vapi" },
@@ -3055,6 +3058,41 @@ requires-dist = [
     { name = "pipecat-ai", extras = ["openai", "deepgram", "elevenlabs", "silero"], specifier = ">=1.0.0" },
     { name = "rory-core", editable = "." },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=8.0" }]
+
+[[package]]
+name = "rory-plivo"
+version = "0.1.0"
+source = { editable = "plivo" }
+dependencies = [
+    { name = "aiortc" },
+    { name = "av" },
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "pipecat-ai", extra = ["deepgram"] },
+    { name = "rory-core" },
+    { name = "uvicorn", extra = ["standard"] },
+    { name = "websockets" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiortc", specifier = ">=1.13" },
+    { name = "av", specifier = ">=14" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "pipecat-ai", extras = ["openai", "deepgram", "elevenlabs", "silero"], specifier = ">=1.0.0" },
+    { name = "rory-core", editable = "." },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+    { name = "websockets", specifier = ">=13" },
 ]
 
 [package.metadata.requires-dev]
