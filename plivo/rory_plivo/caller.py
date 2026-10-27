@@ -149,7 +149,7 @@ async def run_caller_leg(actor_ws: WebSocket, endpoint: Provisioned) -> None:
             tasks = {
                 asyncio.create_task(_pump_actor_to_plivo(actor_ws, mic), name="actor->plivo"),
                 asyncio.create_task(_pump_plivo_to_actor(agent_track, actor_ws), name="plivo->actor"),
-                asyncio.create_task(sip.wait_for_remote_bye(), name="remote-bye"),
+                asyncio.create_task(sip.wait_for_remote_bye(dialog), name="remote-bye"),
                 asyncio.create_task(pc_dead.wait(), name="pc-dead"),
             }
             try:

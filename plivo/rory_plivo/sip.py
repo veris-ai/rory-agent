@@ -89,6 +89,7 @@ class Dialog:
     remote_target: str
     route: str
     answer_sdp: str
+    invite_cseq: int
 
 
 class SipClient:
@@ -178,21 +179,35 @@ class SipClient:
             remote_target=re.search(r"<([^>]+)>", msg.headers["contact"]).group(1),
             route="Route: " + ", ".join(reversed(msg.record_route)),
             answer_sdp=msg.body,
+            invite_cseq=self._cseq,
         )
-        await self._ws.send(
-            self._build(
-                "ACK", dialog.remote_target, to_uri, call_id,
-                cseq=self._cseq, to_tag=dialog.to_tag, extra=(dialog.route,),
-            )
-        )
+        await self._ack(dialog)
         return dialog
 
-    async def wait_for_remote_bye(self) -> None:
-        """Answer in-dialog requests with 200 OK until Plivo sends BYE (the call ended on its side)."""
+    async def _ack(self, dialog: Dialog) -> None:
+        await self._ws.send(
+            self._build(
+                "ACK", dialog.remote_target, dialog.to_uri, dialog.call_id,
+                cseq=dialog.invite_cseq, to_tag=dialog.to_tag, extra=(dialog.route,),
+            )
+        )
+
+    async def wait_for_remote_bye(self, dialog: Dialog) -> None:
+        """Answer in-dialog requests with 200 OK until Plivo sends BYE (the call ended on its side).
+
+        A retransmitted 200 OK to the INVITE means our ACK was lost; every one
+        is ACKed again (RFC 3261 §13.2.2.4), or Plivo eventually drops the call.
+        """
         while True:
             msg = parse(await self._ws.recv())
             if msg.status is not None:
-                continue  # a late response, e.g. a retransmitted 200 OK
+                if (
+                    msg.status == 200
+                    and msg.headers["call-id"] == dialog.call_id
+                    and msg.headers["cseq"] == f"{dialog.invite_cseq} INVITE"
+                ):
+                    await self._ack(dialog)
+                continue
             echoed = [h for h in msg.raw_headers if h.split(":", 1)[0].strip().lower() in ("via", "from", "to", "call-id", "cseq")]
             await self._ws.send("\r\n".join(["SIP/2.0 200 OK", *echoed, "Content-Length: 0"]) + "\r\n\r\n")
             if msg.start_line.startswith("BYE "):
