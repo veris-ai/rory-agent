@@ -83,13 +83,19 @@ async def provision(answer_url: str) -> Provisioned:
 
         # Plivo's endpoint password rules want upper, lower, digit and symbol.
         password = secrets.token_urlsafe(16) + "Aa1!"
-        r = await api.post(
-            "/Endpoint/",
-            json={"username": "rory", "password": password, "alias": f"rory-{tag}", "app_id": app_id},
-        )
-        if r.is_error:
-            (await api.delete(f"/Application/{app_id}/")).raise_for_status()
+        try:
+            r = await api.post(
+                "/Endpoint/",
+                json={"username": "rory", "password": password, "alias": f"rory-{tag}", "app_id": app_id},
+            )
             r.raise_for_status()
+        except Exception as endpoint_error:
+            # Roll back the Application; the Endpoint failure stays the error raised.
+            try:
+                (await api.delete(f"/Application/{app_id}/")).raise_for_status()
+            except Exception as cleanup_error:
+                endpoint_error.add_note(f"rollback of Application {app_id} also failed: {cleanup_error!r}")
+            raise
         endpoint = r.json()
 
     await asyncio.sleep(ENDPOINT_SETTLE_S)
