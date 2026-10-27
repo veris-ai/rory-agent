@@ -42,8 +42,19 @@ def _as_phonic_tool(schema: ToolSchema) -> Dict[str, Any]:
     }
 
 
-# The ``tools`` array sent verbatim in the config message.
+# The shared tools, the ``tools`` array sent in the config message.
 TOOLS: List[Dict[str, Any]] = [_as_phonic_tool(s) for s in SCHEMAS]
+
+# Phonic's built-in turn-taking tool. Phonic runs it itself: the model may choose not
+# to answer, and after ``respond_after_sec`` of silence it speaks anyway. It is not
+# a shared tool, so it is not in ``TOOLS`` or the parity surface.
+BUILT_IN_TOOLS: List[Dict[str, Any]] = [
+    {
+        "type": "built_in",
+        "name": "choose_not_to_respond",
+        "tool_config": {"respond_after_sec": 3},
+    },
+]
 
 
 def tool_surface() -> dict:

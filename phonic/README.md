@@ -28,6 +28,12 @@ every other Rory transport. Phonic's other VAD settings stay on its defaults.
 The tool output timeout is 30 s, not Phonic's 5 s default, because the vendor
 clients are blocking and can run longer than 5 s on a slow call.
 
+The model is Phonic's `phonic-1` at `intelligence_level: high`. Phonic's built-in
+`choose_not_to_respond` tool is enabled with a 3 s response delay. It sits outside
+the shared 16 tools, so the parity surface is unchanged. The judge will not see a
+tool call for it; a turn where the agent chose not to respond shows up only as
+silence in the trace and a log line.
+
 ## Running it
 
 ```
@@ -42,6 +48,7 @@ The image serves `/voice` and `/health` on `:8008`.
 |---|---|---|
 | `PHONIC_API_KEY` | — | Required. Sent as `Authorization: Bearer`. |
 | `PHONIC_VOICE` | `sabrina` | Phonic voice id. |
+| `PHONIC_MODEL` | `phonic-1` | Phonic speech-to-speech model (`phonic-0.5`, `phonic-1` or `phonic-1.1`). |
 | `STRIPE_API_KEY` | — | Sandbox fixture; the billing twin's credential. |
 | `FINERACT_USER` / `FINERACT_PASSWORD` / `FINERACT_TENANT` | `mifos` / `password` / `default` | Fineract's public OSS defaults. |
 

@@ -34,10 +34,11 @@ from rory_tools import CallSession, dispatch
 from rory_tools import clock
 from rory_tools.prompt import GREETING, load_agent_prompt, today_context
 
-from .tools import TOOLS
+from .tools import BUILT_IN_TOOLS, TOOLS
 
 PHONIC_URL = "wss://api.phonic.ai/v1/sts/ws"
 PHONIC_VOICE = os.environ.get("PHONIC_VOICE", "sabrina")
+PHONIC_MODEL = os.environ.get("PHONIC_MODEL", "phonic-1")
 
 # The Veris actor and Phonic both run PCM16 at 24 kHz.
 AUDIO_FORMAT = "pcm_24000"
@@ -73,12 +74,17 @@ def _config() -> dict:
         "system_prompt": f"{AGENT_PROMPT}\n\n{today_context()}",
         "welcome_message": GREETING,
         "voice_id": PHONIC_VOICE,
+        "phonic_model": PHONIC_MODEL,
+        "intelligence_level": "high",
         "input_format": AUDIO_FORMAT,
         "output_format": AUDIO_FORMAT,
         # Turn-taking parity with the other candidates: 800 ms of end-of-turn
         # silence. Phonic's other VAD knobs stay on its defaults.
         "vad_min_silence_duration_ms": 800,
-        "tools": TOOLS,
+        # The shared 16 tools, then Phonic's built-in turn-taking tool. The built-in
+        # is Phonic's addition, not one of the shared tools, so it is listed here and
+        # kept out of the parity surface in tools.py.
+        "tools": TOOLS + BUILT_IN_TOOLS,
     }
 
 
@@ -232,6 +238,9 @@ async def _pump_phonic_to_actor(
 
             elif etype == "assistant_ended_conversation":
                 logger.info("[ph->a] assistant ended the conversation")
+
+            elif etype == "assistant_chose_not_to_respond":
+                logger.info("[ph->a] assistant chose not to respond this turn")
 
             elif etype == "warning":
                 logger.warning(f"[ph->a] Phonic warning: {evt['warning']}")

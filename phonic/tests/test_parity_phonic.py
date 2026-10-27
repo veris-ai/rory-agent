@@ -62,8 +62,8 @@ def test_config_keeps_the_shared_turn_taking_and_audio():
     """The Phonic config the run depends on, pinned.
 
     Audio in and out at 24 kHz to match the actor, 800 ms of end-of-turn silence
-    like every other transport, the shared greeting spoken first, and the shared
-    tool array handed over unchanged.
+    like every other transport, the shared greeting spoken first, the shared tools
+    handed over unchanged, and Phonic's built-in turn-taking tool after them.
     """
     config = agent._config()
     assert config["type"] == "config"
@@ -72,7 +72,17 @@ def test_config_keeps_the_shared_turn_taking_and_audio():
     assert config["vad_min_silence_duration_ms"] == 800
     assert config["welcome_message"] is agent.GREETING
     assert config["system_prompt"].startswith(agent.AGENT_PROMPT)
-    assert config["tools"] is tools.TOOLS
+    assert config["tools"] == tools.TOOLS + tools.BUILT_IN_TOOLS
+    assert config["phonic_model"] == "phonic-1"
+    assert config["intelligence_level"] == "high"
+
+
+def test_built_in_turn_taking_tool_is_outside_the_shared_surface():
+    """The 16 shared tools are the parity surface; the built-in is Phonic's addition."""
+    assert [t["name"] for t in tools.BUILT_IN_TOOLS] == ["choose_not_to_respond"]
+    assert tools.BUILT_IN_TOOLS[0]["tool_config"] == {"respond_after_sec": 3}
+    assert "choose_not_to_respond" not in tools.tool_surface()
+    assert len(tools.tool_surface()) == 16
 
 
 def test_candidate_fails_closed_without_its_credential():
