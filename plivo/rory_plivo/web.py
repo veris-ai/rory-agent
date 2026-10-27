@@ -17,6 +17,10 @@ provisions this pod's own Application + Endpoint before ``/health`` answers.
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, WebSocket
@@ -52,6 +56,7 @@ async def _lifespan(_app: FastAPI):
     )
     base_url, tunnel = public_base_url(PORT)
     STATE["stream_url"] = base_url.replace("https://", "wss://", 1) + "/plivo/stream"
+    STATE["signed_stream_url"] = base_url.replace("https://", "http://", 1) + "/plivo/stream"
     STATE["endpoint"] = await provision(f"{base_url}/plivo/answer")
     try:
         yield
@@ -62,6 +67,24 @@ async def _lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="rory-plivo", version="0.1.0", lifespan=_lifespan)
+
+
+def signed_by_plivo(websocket: WebSocket) -> bool:
+    """Plivo's V3 signature on the stream handshake: base64 HMAC-SHA256 of
+    ``<url>.<nonce>`` keyed by the auth token. The header may carry several
+    comma-separated signatures; one match is enough.
+
+    Plivo signs the stream URL with an ``http://`` scheme, not the ``wss://``
+    the answer XML gives it (checked against live handshakes)."""
+    nonce = websocket.headers.get("x-plivo-signature-v3-nonce")
+    signatures = websocket.headers.get("x-plivo-signature-v3")
+    if not nonce or not signatures:
+        return False
+    mac = hmac.new(
+        os.environ["PLIVO_AUTH_TOKEN"].encode(), f"{STATE['signed_stream_url']}.{nonce}".encode(), hashlib.sha256
+    )
+    expected = base64.b64encode(mac.digest()).decode()
+    return any(hmac.compare_digest(expected, s.strip()) for s in signatures.split(","))
 
 
 @app.get("/health")
@@ -78,6 +101,11 @@ async def plivo_answer(request: Request) -> Response:
 
 @app.websocket("/plivo/stream")
 async def plivo_stream(websocket: WebSocket) -> None:
+    # The tunnel makes this route public: only Plivo may start Rory's paid pipeline.
+    if not signed_by_plivo(websocket):
+        logger.warning("[web] /plivo/stream rejected: missing or bad X-Plivo-Signature-V3")
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
     logger.info("[web] /plivo/stream connected")
     try:

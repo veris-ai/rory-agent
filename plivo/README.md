@@ -67,6 +67,9 @@ Found against Plivo's live service; each is commented where it is fixed:
   they are added back before aiortc reads it.
 - **ACK routing** (`sip.py`): the 200 OK's ACK goes to its Contact, through the
   Record-Route set.
+- **Stream signature** (`web.py`): `/plivo/stream` is public, so the handshake's
+  `X-Plivo-Signature-V3` is checked before Rory's pipeline starts. Plivo signs
+  the stream URL with an `http://` scheme, not the `wss://` it was given.
 
 ## Configuration
 
