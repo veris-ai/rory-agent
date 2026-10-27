@@ -23,6 +23,7 @@ members = [
     "rory-grok-cascade",
     "rory-grok-voice",
     "rory-huggingface",
+    "rory-hydra",
     "rory-livekit",
     "rory-mistral",
     "rory-openai-realtime",
@@ -2537,6 +2538,7 @@ dev = [
     { name = "rory-grok-cascade" },
     { name = "rory-grok-voice" },
     { name = "rory-huggingface" },
+    { name = "rory-hydra" },
     { name = "rory-livekit" },
     { name = "rory-mistral" },
     { name = "rory-openai-realtime" },
@@ -2576,6 +2578,7 @@ dev = [
     { name = "rory-grok-cascade", editable = "grok-cascade" },
     { name = "rory-grok-voice", editable = "grok-voice" },
     { name = "rory-huggingface", editable = "huggingface" },
+    { name = "rory-hydra", editable = "hydra" },
     { name = "rory-livekit", editable = "livekit" },
     { name = "rory-mistral", editable = "mistral" },
     { name = "rory-openai-realtime", editable = "openai-realtime" },
@@ -2931,6 +2934,35 @@ requires-dist = [
     { name = "openai", specifier = ">=1.50" },
     { name = "rory-core", extras = ["vad"], editable = "." },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=8.0" }]
+
+[[package]]
+name = "rory-hydra"
+version = "0.1.0"
+source = { editable = "hydra" }
+dependencies = [
+    { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
+    { name = "fastapi" },
+    { name = "rory-core" },
+    { name = "uvicorn", extra = ["standard"] },
+    { name = "websockets" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "rory-core", editable = "." },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+    { name = "websockets", specifier = ">=13" },
 ]
 
 [package.metadata.requires-dev]
