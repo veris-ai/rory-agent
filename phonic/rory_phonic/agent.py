@@ -45,7 +45,20 @@ AUDIO_FORMAT = "pcm_24000"
 # Roughly one heartbeat per second at 20 ms frames.
 LOG_EVERY_N_FRAMES = 50
 
+# The close code of a conversation that ended on purpose. Any other close from
+# Phonic is a failure and must reach the caller of the handler as one.
+NORMAL_CLOSE = 1000
+# RFC 6455: the connection closed without a close frame.
+CLOSED_WITHOUT_FRAME = 1006
+
 AGENT_PROMPT = load_agent_prompt()
+
+
+def _close(exc: websockets.ConnectionClosed) -> tuple[int, str]:
+    """The close code and reason Phonic sent, or 1006 when it sent no close frame."""
+    if exc.rcvd is None:
+        return CLOSED_WITHOUT_FRAME, ""
+    return exc.rcvd.code, exc.rcvd.reason
 
 
 def _config() -> dict:
@@ -92,25 +105,36 @@ async def run_voice_ws_bot(actor_ws: WebSocket) -> None:
             if ready["type"] != "ready_to_start_conversation":
                 raise RuntimeError(f"Phonic answered the config with {ready['type']}: {ready}")
 
-            up = asyncio.create_task(_pump_actor_to_phonic(actor_ws, ph_ws), name="actor->phonic")
-            down = asyncio.create_task(
-                _pump_phonic_to_actor(ph_ws, actor_ws, session_state), name="phonic->actor"
-            )
+            tool_calls: asyncio.Queue = asyncio.Queue()
+            interrupted: set[str] = set()
+            tasks = [
+                asyncio.create_task(_pump_actor_to_phonic(actor_ws, ph_ws), name="actor->phonic"),
+                asyncio.create_task(
+                    _pump_phonic_to_actor(ph_ws, actor_ws, tool_calls, interrupted), name="phonic->actor"
+                ),
+                asyncio.create_task(
+                    _run_tool_calls(ph_ws, session_state, tool_calls, interrupted), name="tool-calls"
+                ),
+            ]
             try:
-                done, _ = await asyncio.wait({up, down}, return_when=asyncio.FIRST_COMPLETED)
+                done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                 for task in done:
                     task.result()
             finally:
-                for task in (up, down):
+                for task in tasks:
                     if not task.done():
                         task.cancel()
-                await asyncio.gather(up, down, return_exceptions=True)
+                await asyncio.gather(*tasks, return_exceptions=True)
     finally:
         logger.info(f"[voice] handler exit duration={time.monotonic() - t_start:.1f}s")
 
 
 async def _pump_actor_to_phonic(actor_ws: WebSocket, ph_ws) -> None:
-    """Binary PCM16 frames from the actor → Phonic audio_chunk messages."""
+    """Binary PCM16 frames from the actor → Phonic audio_chunk messages.
+
+    The actor hanging up is the call ending. Phonic closing it is a failure unless
+    it closed normally.
+    """
     n_frames = 0
     n_bytes = 0
     try:
@@ -137,10 +161,10 @@ async def _pump_actor_to_phonic(actor_ws: WebSocket, ph_ws) -> None:
             f"({n_bytes} bytes): code={getattr(exc, 'code', '?')}"
         )
     except websockets.ConnectionClosed as exc:
-        logger.info(
-            f"[a->ph] Phonic closed the conversation during the call after {n_frames} frames "
-            f"({n_bytes} bytes): code={exc.code} reason={exc.reason}"
-        )
+        code, _ = _close(exc)
+        if code != NORMAL_CLOSE:
+            raise
+        logger.info(f"[a->ph] Phonic closed normally during the call after {n_frames} frames")
     except KeyError as exc:
         # Starlette raises KeyError('bytes') when it got a text frame instead of
         # a binary one — a protocol mismatch on the actor side, not a bug here.
@@ -151,8 +175,14 @@ async def _pump_actor_to_phonic(actor_ws: WebSocket, ph_ws) -> None:
         raise
 
 
-async def _pump_phonic_to_actor(ph_ws, actor_ws: WebSocket, session_state: CallSession) -> None:
-    """Phonic messages → audio bytes back to the actor; dispatch tool calls."""
+async def _pump_phonic_to_actor(
+    ph_ws, actor_ws: WebSocket, tool_calls: asyncio.Queue, interrupted: set[str]
+) -> None:
+    """Phonic messages → audio bytes back to the actor; queue tool calls for the worker.
+
+    This loop never waits on a tool, so audio and interruptions keep flowing while
+    a vendor call runs. A Phonic close with any code but ``NORMAL_CLOSE`` raises.
+    """
     n_audio_frames = 0
     n_audio_bytes = 0
 
@@ -189,20 +219,12 @@ async def _pump_phonic_to_actor(ph_ws, actor_ws: WebSocket, session_state: CallS
                 logger.info(f"[ph->a] interrupted after: {evt['text']}")
 
             elif etype == "tool_call":
-                name = evt["tool_name"]
-                # Every vendor client is blocking, and this coroutine is carrying
-                # the caller's audio. Called inline, a slow vendor call is dead
-                # air — the same reason the other transports hop threads. Awaiting
-                # here also keeps tool calls sequential: they share account state.
-                result = await asyncio.to_thread(dispatch, session_state, name, evt["parameters"])
-                logger.info(f"[ph->a] tool {name} ({evt['tool_call_id']}) -> {json.dumps(result, default=str)}")
-                await ph_ws.send(json.dumps({
-                    "type": "tool_call_output",
-                    "tool_call_id": evt["tool_call_id"],
-                    "output": result,
-                }))
+                await tool_calls.put(evt)
 
             elif etype == "tool_call_interrupted":
+                # Phonic cut the call off; its output would be stale, so the worker
+                # drops it instead of sending it.
+                interrupted.add(evt["tool_call_id"])
                 logger.warning(f"[ph->a] tool {evt['tool_name']} ({evt['tool_call_id']}) interrupted")
 
             elif etype == "conversation_created":
@@ -218,9 +240,50 @@ async def _pump_phonic_to_actor(ph_ws, actor_ws: WebSocket, session_state: CallS
                 raise RuntimeError(f"Phonic realtime error: {evt['error']}")
 
     except websockets.ConnectionClosed as exc:
+        code, reason = _close(exc)
+        if code != NORMAL_CLOSE:
+            logger.error(
+                f"[ph->a] Phonic WS closed abnormally code={code} reason={reason}; "
+                f"{n_audio_frames} audio chunks, {n_audio_bytes} audio bytes"
+            )
+            raise
         logger.info(
-            f"[ph->a] Phonic WS closed code={exc.code} reason={exc.reason}; "
-            f"{n_audio_frames} audio chunks, {n_audio_bytes} audio bytes"
+            f"[ph->a] Phonic WS closed normally; {n_audio_frames} audio chunks, {n_audio_bytes} audio bytes"
         )
     except WebSocketDisconnect:
         logger.info("[ph->a] actor WS closed; ending Phonic receive loop")
+
+
+async def _run_tool_calls(
+    ph_ws, session_state: CallSession, tool_calls: asyncio.Queue, interrupted: set[str]
+) -> None:
+    """Run Phonic's tool calls one at a time and send each output back.
+
+    The vendor clients are blocking and share account state, so calls run in order
+    on a worker thread. The receive loop keeps consuming Phonic events meanwhile.
+    """
+    while True:
+        evt = await tool_calls.get()
+        try:
+            await _run_tool_call(ph_ws, session_state, evt, interrupted)
+        finally:
+            tool_calls.task_done()
+
+
+async def _run_tool_call(ph_ws, session_state: CallSession, evt: dict, interrupted: set[str]) -> None:
+    """Run one tool call and send its output, unless Phonic interrupted it."""
+    call_id = evt["tool_call_id"]
+    name = evt["tool_name"]
+    if call_id in interrupted:
+        logger.info(f"[ph->a] tool {name} ({call_id}) was interrupted before it ran; not run")
+        return
+    result = await asyncio.to_thread(dispatch, session_state, name, evt["parameters"])
+    logger.info(f"[ph->a] tool {name} ({call_id}) -> {json.dumps(result, default=str)}")
+    if call_id in interrupted:
+        logger.info(f"[ph->a] tool {name} ({call_id}) interrupted while running; output dropped")
+        return
+    await ph_ws.send(json.dumps({
+        "type": "tool_call_output",
+        "tool_call_id": call_id,
+        "output": result,
+    }))

@@ -14,7 +14,7 @@ shared dispatcher, and its result goes back on the same socket as a
 
 Phonic is its own protocol, not OpenAI Realtime-compatible. The transport uses:
 
-- `ready_to_start_conversation` is read first; the pod then sends `config`.
+- The pod sends `config` first, then reads `ready_to_start_conversation`. Phonic sends nothing before the config.
 - `audio_chunk` both ways, base64 PCM16. The first chunk from the actor also
   carries `iso_date_time`, which Phonic requires once per conversation.
 - `input_text` for the caller's transcript and `audio_chunk.text` for Rory's.
