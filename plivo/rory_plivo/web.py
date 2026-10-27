@@ -55,13 +55,15 @@ async def _lifespan(_app: FastAPI):
         "PLIVO_AUTH_ID", "PLIVO_AUTH_TOKEN",
     )
     base_url, tunnel = public_base_url(PORT)
-    STATE["stream_url"] = base_url.replace("https://", "wss://", 1) + "/plivo/stream"
-    STATE["signed_stream_url"] = base_url.replace("https://", "http://", 1) + "/plivo/stream"
-    STATE["endpoint"] = await provision(f"{base_url}/plivo/answer")
     try:
-        yield
+        STATE["stream_url"] = base_url.replace("https://", "wss://", 1) + "/plivo/stream"
+        STATE["signed_stream_url"] = base_url.replace("https://", "http://", 1) + "/plivo/stream"
+        STATE["endpoint"] = await provision(f"{base_url}/plivo/answer")
+        try:
+            yield
+        finally:
+            await teardown(STATE["endpoint"])
     finally:
-        await teardown(STATE["endpoint"])
         if tunnel is not None:
             tunnel.terminate()
 

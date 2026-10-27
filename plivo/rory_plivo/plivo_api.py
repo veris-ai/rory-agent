@@ -87,7 +87,9 @@ async def provision(answer_url: str) -> Provisioned:
             "/Endpoint/",
             json={"username": "rory", "password": password, "alias": f"rory-{tag}", "app_id": app_id},
         )
-        r.raise_for_status()
+        if r.is_error:
+            (await api.delete(f"/Application/{app_id}/")).raise_for_status()
+            r.raise_for_status()
         endpoint = r.json()
 
     await asyncio.sleep(ENDPOINT_SETTLE_S)
