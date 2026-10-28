@@ -13,27 +13,28 @@ import time
 
 import pytest
 import websockets
-from websockets.frames import Close
+from websockets.frames import OK_CLOSE_CODES, Close
 
 from rory_phonic import agent
 
 
 class FakePhonic:
-    """Yields scripted Phonic messages, then closes with the given code; records sends."""
+    """Yields scripted Phonic messages, then closes the way websockets does: the OK
+    codes raise ConnectionClosedOK, every other code raises ConnectionClosedError."""
 
     def __init__(self, messages, close_code=agent.NORMAL_CLOSE):
         self._messages = list(messages)
         self._close_code = close_code
         self.sent: list[dict] = []
 
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
+    async def recv(self):
         if self._messages:
             return json.dumps(self._messages.pop(0))
         await asyncio.sleep(0)
-        raise websockets.ConnectionClosed(Close(self._close_code, "test close"), None)
+        rcvd = Close(self._close_code, "test close")
+        if self._close_code in OK_CLOSE_CODES:
+            raise websockets.ConnectionClosedOK(rcvd, None)
+        raise websockets.ConnectionClosedError(rcvd, None)
 
     async def send(self, raw):
         self.sent.append(json.loads(raw))
@@ -77,7 +78,15 @@ def _run_pumps(messages, close_code, dispatch_fn, monkeypatch):
 def test_upstream_abnormal_close_is_raised_not_swallowed(monkeypatch):
     with pytest.raises(websockets.ConnectionClosed) as info:
         _run_pumps([_audio("Hello.")], 1011, lambda *a: {}, monkeypatch)
-    assert info.value.code == 1011
+    assert info.value.rcvd.code == 1011
+
+
+@pytest.mark.parametrize("close_code", [1001, 1005])
+def test_upstream_close_that_plain_iteration_would_hide_is_raised(close_code, monkeypatch):
+    """A plain `async for` ends quietly on 1001 and 1005; the receive loop must raise."""
+    with pytest.raises(websockets.ConnectionClosed) as info:
+        _run_pumps([_audio("Hello.")], close_code, lambda *a: {}, monkeypatch)
+    assert info.value.rcvd.code == close_code
 
 
 def test_upstream_normal_close_returns(monkeypatch):

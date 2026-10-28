@@ -193,7 +193,10 @@ async def _pump_phonic_to_actor(
     n_audio_bytes = 0
 
     try:
-        async for raw in ph_ws:
+        # recv(), not `async for`: iteration ends quietly on 1000, 1001 and 1005 alike,
+        # so a Phonic close with 1001 or 1005 would look like a normal end of the call.
+        while True:
+            raw = await ph_ws.recv()
             evt = json.loads(raw)
             etype = evt["type"]
 
