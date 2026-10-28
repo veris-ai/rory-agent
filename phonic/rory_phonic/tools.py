@@ -10,6 +10,11 @@ Phonic declares an inline tool as a ``custom_websocket`` entry whose
 ``tool_schema`` is the OpenAI function shape, so the shared JSON-Schema
 ``parameters()`` object goes in unchanged. The tool is ``sync``: the pod answers
 each ``tool_call`` with a ``tool_call_output`` before the model continues.
+
+It is also ``uninterruptible``. By default, caller speech during a sync call
+cancels it, but a call already running may have acted (a payment recorded, a plan
+opened), and a model that never hears the result asks again. With the flag on,
+Phonic still hears the caller and answers once the tool returns.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ def _as_phonic_tool(schema: ToolSchema) -> Dict[str, Any]:
     return {
         "type": "custom_websocket",
         "execution_mode": "sync",
+        "uninterruptible": True,
         "tool_call_output_timeout_ms": TOOL_CALL_OUTPUT_TIMEOUT_MS,
         "tool_schema": {
             "type": "function",

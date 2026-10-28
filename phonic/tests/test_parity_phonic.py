@@ -77,6 +77,18 @@ def test_config_keeps_the_shared_turn_taking_and_audio():
     assert config["intelligence_level"] == "high"
 
 
+def test_shared_tools_are_sync_and_uninterruptible():
+    """Caller speech must not cancel a tool call in flight.
+
+    By default Phonic cancels a sync call when the caller talks over it. A call that
+    has started may already have acted, so the model asks again and a payment is
+    recorded twice. With ``uninterruptible`` Phonic waits for the output.
+    """
+    for tool in tools.TOOLS:
+        assert tool["execution_mode"] == "sync"
+        assert tool["uninterruptible"] is True
+
+
 def test_built_in_turn_taking_tool_is_outside_the_shared_surface():
     """The 16 shared tools are the parity surface; the built-in is Phonic's addition."""
     assert [t["name"] for t in tools.BUILT_IN_TOOLS] == ["choose_not_to_respond"]

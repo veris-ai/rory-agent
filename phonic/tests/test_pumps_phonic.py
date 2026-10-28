@@ -61,10 +61,9 @@ def _run_pumps(messages, close_code, dispatch_fn, monkeypatch):
         ph = FakePhonic(messages, close_code)
         actor = FakeActor()
         queue: asyncio.Queue = asyncio.Queue()
-        interrupted: set[str] = set()
-        worker = asyncio.create_task(agent._run_tool_calls(ph, object(), queue, interrupted))
+        worker = asyncio.create_task(agent._run_tool_calls(ph, object(), queue))
         try:
-            await agent._pump_phonic_to_actor(ph, actor, queue, interrupted)
+            await agent._pump_phonic_to_actor(ph, actor, queue)
             # Wait for the worker to finish every call the pump queued.
             await asyncio.wait_for(queue.join(), timeout=10)
         finally:
@@ -115,20 +114,24 @@ def test_slow_tool_does_not_block_audio_or_interruptions(monkeypatch):
     assert order == ["tool-done"]
 
 
-def test_interrupted_tool_output_is_not_sent(monkeypatch):
-    """A tool cut off by Phonic gets no output: it would be stale."""
+def test_output_is_sent_even_if_phonic_reports_the_call_interrupted(monkeypatch):
+    """A tool that has run has acted, so Phonic gets its output even after an interrupt.
+
+    Dropping it is how one $25 repayment got recorded twice: Phonic never heard the
+    first one went through and asked again.
+    """
 
     def slow_dispatch(session, name, args):
         time.sleep(0.3)
         return {"ok": True}
 
     messages = [
-        {"type": "tool_call", "tool_call_id": "c2", "tool_name": "get_account", "parameters": {}},
-        {"type": "tool_call_interrupted", "tool_call_id": "c2", "tool_name": "get_account"},
+        {"type": "tool_call", "tool_call_id": "c2", "tool_name": "modify_payment_arrangement", "parameters": {}},
+        {"type": "tool_call_interrupted", "tool_call_id": "c2", "tool_name": "modify_payment_arrangement"},
     ]
     ph, _ = _run_pumps(messages, agent.NORMAL_CLOSE, slow_dispatch, monkeypatch)
 
-    assert ph.sent == []
+    assert ph.sent == [{"type": "tool_call_output", "tool_call_id": "c2", "output": {"ok": True}}]
 
 
 def test_tool_calls_run_in_order(monkeypatch):

@@ -7,9 +7,8 @@ One Phonic conversation websocket per call. The pod connects to
 `wss://api.phonic.ai/v1/sts/ws`, sends one `config` carrying the shared system
 prompt, greeting and Rory's 16 tools, and then bridges the Veris actor's PCM16
 to it. Phonic speaks the greeting first. Each tool call runs locally through the
-shared dispatcher, and its result goes back on the same socket as a
-`tool_call_output`, unless Phonic has already interrupted that call; then the
-result is dropped. Nothing dials in.
+shared dispatcher, and its result always goes back on the same socket as a
+`tool_call_output`. Nothing dials in.
 
 ## The wire
 
@@ -20,7 +19,10 @@ Phonic is its own protocol, not OpenAI Realtime-compatible. The transport uses:
   carries `iso_date_time`, which Phonic requires once per conversation.
 - `input_text` for the caller's transcript and `audio_chunk.text` for Rory's.
 - `tool_call` → `tool_call_output` on the same `tool_call_id`, with the tool
-  declared inline as `custom_websocket`, `execution_mode: "sync"`.
+  declared inline as `custom_websocket`, `execution_mode: "sync"`,
+  `uninterruptible: true`. Without the flag, caller speech during a call cancels
+  it. A call that has already acted (a payment, a new plan) is then asked for
+  again and recorded twice.
 
 Audio is `pcm_24000` both ways, so neither leg is resampled. Turn-taking is
 pinned to 800 ms of end-of-turn silence (`vad_min_silence_duration_ms`). Phonic's
