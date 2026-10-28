@@ -435,6 +435,8 @@ class _Call:
                 cut(final=False)
             elif event["type"] == "tool":
                 logger.info(f"[llm] tool {event['name']} after {time.monotonic() - t0:.2f}s")
+                # The words before a tool call are complete: say them while it runs.
+                cut(final=True)
             elif event["type"] == "turn":
                 turn = event["turn"]
         await invoking  # raises if the runtime failed

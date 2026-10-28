@@ -376,3 +376,41 @@ def test_tools_lambda_keeps_one_fineract_client_per_twin(monkeypatch):
         tools_lambda.handler({SESSION_ARG: "s"}, _gateway_context("get_account"))
 
     assert built == ["https://twin-a/fineract", "https://twin-b/fineract"]
+
+
+def test_words_before_a_tool_call_are_spoken_while_the_tool_runs(monkeypatch):
+    import threading
+
+    spoken = []
+    preamble_spoken = threading.Event()
+
+    async def synthesize(text):
+        spoken.append(text)
+        if text == "Let me check.":
+            preamble_spoken.set()
+        return [], bytes(agent.BYTES_PER_MS)
+
+    def invoke_turn(session_id, payload, emit):
+        emit({"type": "round", "index": 0})
+        emit({"type": "text", "text": "Let me check."})
+        emit({"type": "tool", "name": "get_account"})
+        # The tool "runs" until the preamble has been spoken.
+        assert preamble_spoken.wait(5), "the preamble waited for the tool"
+        emit({"type": "round", "index": 1})
+        emit({"type": "text", "text": "You owe 42 dollars."})
+        emit({"type": "turn", "turn": {"messages": [], "rounds": []}})
+
+    class Actor:
+        client = None
+
+        async def send_bytes(self, data):
+            pass
+
+    monkeypatch.setattr(agent, "_synthesize", synthesize)
+    monkeypatch.setattr(agent, "_invoke_turn", invoke_turn)
+    monkeypatch.setattr(agent.trace, "report_turn", lambda history, turn: None)
+    monkeypatch.setattr(agent, "SileroVad", lambda rate: None)
+
+    asyncio.run(agent._Call(Actor())._take_turn("what do I owe"))
+
+    assert spoken == ["Let me check.", "You owe 42 dollars."]

@@ -51,8 +51,9 @@ MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-5-5")
 # The caller hears dead air while a tool runs. A sentence spoken first covers it.
 VOICE_NOTE = (
     "This is a live phone call: the caller hears silence while a tool runs. Before "
-    "every tool call, first say one short sentence telling the caller what you are "
-    'doing, such as "Let me pull up your account."'
+    "every tool call, including one that follows another tool's result, first say one "
+    'short sentence telling the caller what you are doing, such as "Let me pull up '
+    'your account."'
 )
 
 # Everything up to here is the same on every request of a call, and most of it on
