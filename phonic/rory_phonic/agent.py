@@ -224,8 +224,9 @@ async def _pump_phonic_to_actor(ph_ws, actor_ws: WebSocket, tool_calls: asyncio.
                 await tool_calls.put(evt)
 
             elif etype == "tool_call_interrupted":
-                # Not expected: the shared tools are uninterruptible. The worker still
-                # sends the call's output, because a tool that has run has acted.
+                # Not expected: the lookups are uninterruptible and caller speech doesn't
+                # cancel async tools. The worker still sends the call's output, because a
+                # tool that has run has acted.
                 logger.warning(f"[ph->a] tool {evt['tool_name']} ({evt['tool_call_id']}) interrupted")
 
             elif etype == "conversation_created":
