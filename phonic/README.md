@@ -18,11 +18,17 @@ Phonic is its own protocol, not OpenAI Realtime-compatible. The transport uses:
 - `audio_chunk` both ways, base64 PCM16. The first chunk from the actor also
   carries `iso_date_time`, which Phonic requires once per conversation.
 - `input_text` for the caller's transcript and `audio_chunk.text` for Rory's.
-- `tool_call` → `tool_call_output` on the same `tool_call_id`, with the tool
-  declared inline as `custom_websocket`, `execution_mode: "sync"`,
-  `uninterruptible: true`. Without the flag, caller speech during a call cancels
-  it. A call that has already acted (a payment, a new plan) is then asked for
-  again and recorded twice.
+- `tool_call` → `tool_call_output` on the same `tool_call_id`, with each tool
+  declared inline as `custom_websocket`. By default, caller speech during a sync
+  call cancels it, and a call that has already acted (a payment, a new plan) is
+  then asked for again and recorded twice. So no tool can be cancelled that way:
+  - The five tools that change the account (a payment, a new or changed plan, a
+    due-date extension, paperless billing) are `execution_mode: "async"` with
+    `wait_for_response: true`. The conversation goes on while they run, and the
+    agent speaks the result when it arrives. Phonic requires
+    `allow_tool_chaining: false` with `wait_for_response`.
+  - The lookups are `execution_mode: "sync"` with `uninterruptible: true`, so
+    they still chain, e.g. verifying the caller and then reading the account.
 
 Audio is `pcm_24000` both ways, so neither leg is resampled. Turn-taking is
 pinned to 800 ms of end-of-turn silence (`vad_min_silence_duration_ms`). Phonic's
