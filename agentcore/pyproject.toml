@@ -9,6 +9,8 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "boto3>=1.40",
+    "aws-sdk-lex-runtime-v2>=0.12",
+    "awscrt>=0.27",
     "opentelemetry-api>=1.27",
 ]
 

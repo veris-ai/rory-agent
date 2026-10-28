@@ -27,10 +27,11 @@ async def _lifespan(_app: FastAPI):
         "AWS_REGION",
         "LEX_BOT_ID",
         "LEX_BOT_ALIAS_ID",
+        "INIT_LAMBDA",
+        "AGENTCORE_RUNTIME_ARN",
         "STRIPE_API_BASE",
         "STRIPE_API_KEY",
         "FINERACT_API_BASE",
-        "SESSIONS_TABLE",
     )
     resolve_vendor()
     yield

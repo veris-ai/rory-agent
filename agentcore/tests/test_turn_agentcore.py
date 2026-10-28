@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import base64
-import gzip
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -12,18 +11,12 @@ from rory_agentcore import agent, init_lambda, runtime, tools_lambda
 from rory_agentcore.contract import (
     ATTR_INTERRUPTED_REPLY,
     ATTR_REFERENCE_TIME,
-    ATTR_STRIPE_API_BASE,
     CALL_CONNECTED,
     INTERRUPTED_MARKER,
     SESSION_ARG,
 )
 
 from rory_tools.prompt import GREETING
-
-
-def _compressed(value) -> str:
-    """Lex's compressed fields: JSON (a transcript is a JSON string), gzipped, then base64."""
-    return base64.b64encode(gzip.compress(json.dumps(value).encode())).decode()
 
 
 class _Body:
@@ -33,73 +26,103 @@ class _Body:
     def read(self):
         return self._data
 
-    def close(self):
-        pass
-
 
 # ----------------------------------------------------------------------- the pod
 
 
-def test_lex_turn_carries_the_session_attributes_and_returns_the_agent_reply(monkeypatch):
-    seen = {}
-
-    class FakeLex:
-        def recognize_utterance(self, **kwargs):
-            seen.update(kwargs)
-            return {
-                "inputTranscript": _compressed("I want to pay my bill"),
-                "messages": _compressed([{"contentType": "PlainText", "content": "Sure."},
-                                         {"contentType": "PlainText", "content": "Account number?"}]),
-                "audioStream": _Body(),
-            }
-
-    monkeypatch.setattr(agent, "_lex", FakeLex(), raising=False)
-    monkeypatch.setattr(agent, "_bot_id", "bot", raising=False)
-    monkeypatch.setattr(agent, "_bot_alias_id", "alias", raising=False)
-
-    transcript, reply = agent._recognize("s1", b"\x01\x02", {ATTR_STRIPE_API_BASE: "https://twin/stripe"})
-
-    assert (transcript, reply) == ("I want to pay my bill", "Sure. Account number?")
-    assert seen["requestContentType"] == "audio/l16; rate=16000; channels=1"
-    assert seen["inputStream"] == b"\x01\x02"
-    state = json.loads(gzip.decompress(base64.b64decode(seen["sessionState"])))
-    assert state == {"sessionAttributes": {ATTR_STRIPE_API_BASE: "https://twin/stripe"}}
-
-
-def test_lex_turn_with_no_reply_is_silence(monkeypatch):
-    class FakeLex:
-        def recognize_utterance(self, **kwargs):
-            return {"inputTranscript": _compressed(""), "audioStream": _Body()}
-
-    monkeypatch.setattr(agent, "_lex", FakeLex(), raising=False)
-    monkeypatch.setattr(agent, "_bot_id", "bot", raising=False)
-    monkeypatch.setattr(agent, "_bot_alias_id", "alias", raising=False)
-
-    assert agent._recognize("s1", b"", {}) == ("", "")
+def _piece(round_, start, text, marks, sent_ms):
+    piece = agent._Piece(round_, start, text, synth=None)
+    piece.marks = marks
+    piece.sent_bytes = sent_ms * agent.BYTES_PER_MS
+    return piece
 
 
 def test_barge_in_keeps_only_the_words_that_started_before_the_cut():
-    call = agent._Call(SimpleNamespace(client=None))
-    call._marks = [
-        {"time": 0, "start": 0, "end": 4}, {"time": 400, "start": 6, "end": 10},
-        {"time": 700, "start": 11, "end": 13}, {"time": 900, "start": 14, "end": 16},
+    marks = [{"time": 0, "start": 0, "end": 5}, {"time": 400, "start": 6, "end": 10},
+             {"time": 700, "start": 11, "end": 13}, {"time": 900, "start": 14, "end": 17}]
+    assert _piece(0, 0, "Sure, here it is.", marks, 500).heard() == "Sure, here"
+
+
+def test_polly_offsets_are_bytes_so_a_dash_does_not_shift_the_cut():
+    text = "Rory — how can I help?"
+    # "—" is three bytes in UTF-8: "how" starts at byte 9, character 7.
+    marks = [{"time": 0, "start": 0, "end": 4}, {"time": 300, "start": 9, "end": 12},
+             {"time": 600, "start": 13, "end": 16}]
+    assert _piece(0, 0, text, marks, 400).heard() == "Rory — how"
+
+
+def test_heard_reply_is_the_last_round_up_to_the_cut():
+    rounds = ["Let me check. ", "Your balance is 42 dollars. Anything else?"]
+    played = [
+        _piece(0, 0, "Let me check. ", [], 2000),
+        _piece(1, 0, "Your balance is 42 dollars. ", [], 2000),
+        _piece(1, 28, "Anything else?", [{"time": 0, "start": 0, "end": 8}, {"time": 500, "start": 9, "end": 14}], 100),
+        _piece(1, 42, "unsent", [], 0),
     ]
-    call._sent_bytes = 500 * agent.BYTES_PER_MS  # 500 ms played
-
-    assert call._heard_part("Sure, here it is.") == "Sure, here"
+    assert agent._Call._heard_reply(played, rounds) == "Your balance is 42 dollars. Anything"
 
 
-def test_barge_in_before_any_audio_keeps_nothing():
-    call = agent._Call(SimpleNamespace(client=None))
-    call._marks = [{"time": 0, "start": 0, "end": 5}]
-    call._sent_bytes = 0
+def test_cut_during_a_tool_preamble_hears_none_of_the_reply():
+    rounds = ["Let me check. ", "Your balance is 42 dollars."]
+    played = [_piece(0, 0, "Let me check. ", [{"time": 0, "start": 0, "end": 3}], 200)]
+    assert agent._Call._heard_reply(played, rounds) == ""
 
-    assert call._heard_part("Hello there") == ""
+
+def test_runtime_events_are_read_as_they_arrive_across_chunk_boundaries(monkeypatch):
+    wire = b"".join(f"data: {json.dumps(e)}\n\n".encode() for e in (
+        {"type": "round", "index": 0}, {"type": "text", "text": "Hi."}, {"type": "turn", "turn": {}},
+    ))
+    chunks = [wire[i:i + 7] for i in range(0, len(wire), 7)]
+
+    class Raw:
+        def read1(self, _n):
+            return chunks.pop(0) if chunks else b""
+
+    sent = {}
+
+    class FakeAgentCore:
+        def invoke_agent_runtime(self, **kwargs):
+            sent.update(kwargs)
+            return {"response": SimpleNamespace(_raw_stream=Raw())}
+
+    monkeypatch.setattr(agent, "_agentcore", FakeAgentCore(), raising=False)
+    monkeypatch.setenv("AGENTCORE_RUNTIME_ARN", "arn:runtime")
+    events = []
+
+    agent._invoke_turn("s1", {"text": "hello"}, events.append)
+
+    assert [e["type"] for e in events] == ["round", "text", "turn"]
+    assert sent["runtimeSessionId"] == "s1"
+    assert sent["accept"] == "text/event-stream"
+    assert json.loads(sent["payload"]) == {"text": "hello"}
+
+
+def test_init_sends_the_twins_and_fails_loudly(monkeypatch):
+    calls = []
+
+    class FakeLambda:
+        def __init__(self, error):
+            self.error = error
+
+        def invoke(self, **kwargs):
+            calls.append(json.loads(kwargs["Payload"]))
+            resp = {"Payload": _Body(b'{"errorMessage": "boom"}' if self.error else b'{"ready": true}')}
+            return {**resp, "FunctionError": "Unhandled"} if self.error else resp
+
+    monkeypatch.setenv("INIT_LAMBDA", "rory-agentcore-init")
+    monkeypatch.setattr(agent, "_twins", {"stripe_api_base": "https://twin/stripe"}, raising=False)
+    monkeypatch.setattr(agent, "_lambda", FakeLambda(error=False), raising=False)
+    agent._init_agent("s1")
+    assert calls == [{"session_id": "s1", "stripe_api_base": "https://twin/stripe"}]
+
+    monkeypatch.setattr(agent, "_lambda", FakeLambda(error=True), raising=False)
+    with pytest.raises(RuntimeError, match="boom"):
+        agent._init_agent("s1")
 
 
 def test_audio_is_resampled_to_the_rate_each_leg_speaks():
     one_second_at_24k = bytes(agent.BYTES_PER_S)
-    assert len(agent._to_rate(one_second_at_24k, agent.ACTOR_RATE_HZ, agent.LEX_RATE_HZ)) == 16000 * 2
+    assert len(agent._to_rate(one_second_at_24k, agent.ACTOR_RATE_HZ, agent.LEX_RATE_HZ)) == 8000 * 2
     # ratecv rounds the sample count, so the length can be a sample short.
     one_second_at_16k = bytes(16000 * 2)
     assert abs(len(agent._to_rate(one_second_at_16k, agent.POLLY_RATE_HZ, agent.ACTOR_RATE_HZ)) - agent.BYTES_PER_S) <= 4
@@ -108,35 +131,58 @@ def test_audio_is_resampled_to_the_rate_each_leg_speaks():
 # ------------------------------------------------------------------- the runtime
 
 
+def _stream(content):
+    """A Converse message as the event stream ConverseStream sends it."""
+    events = [{"messageStart": {"role": "assistant"}}]
+    for i, block in enumerate(content):
+        if "text" in block:
+            for word in block["text"].split(" "):
+                events.append({"contentBlockDelta": {"contentBlockIndex": i, "delta": {"text": word + " "}}})
+        else:
+            use = block["toolUse"]
+            events.append({"contentBlockStart": {"contentBlockIndex": i, "start": {
+                "toolUse": {"toolUseId": use["toolUseId"], "name": use["name"]}}}})
+            events.append({"contentBlockDelta": {"contentBlockIndex": i, "delta": {
+                "toolUse": {"input": json.dumps(use["input"])}}}})
+        events.append({"contentBlockStop": {"contentBlockIndex": i}})
+    return events
+
+
 class FakeBedrock:
-    """Answers each converse call with the next scripted (stopReason, content) round."""
+    """Answers each converse_stream call with the next scripted (stopReason, content) round."""
 
     def __init__(self, rounds):
         self._rounds = iter(rounds)
         self.calls = []
 
-    def converse(self, **kwargs):
+    def converse_stream(self, **kwargs):
         self.calls.append(kwargs)
         stop, content = next(self._rounds)
-        return {
-            "stopReason": stop,
-            "output": {"message": {"role": "assistant", "content": content}},
-            "usage": {"inputTokens": 100, "outputTokens": 10},
-        }
+        return {"stream": [
+            *_stream(content),
+            {"messageStop": {"stopReason": stop}},
+            {"metadata": {"usage": {"inputTokens": 10, "outputTokens": 5, "cacheReadInputTokens": 90}}},
+        ]}
+
+    def converse(self, **kwargs):
+        self.calls.append(kwargs)
+        return {}
 
 
-def test_new_session_seeds_the_greeting_the_pod_already_spoke():
+def test_new_session_seeds_the_greeting_the_pod_speaks():
     session = runtime._new_session(None)
     assert session["system"][0] == {"text": runtime.AGENT_PROMPT}
+    assert session["system"][-1] == {"text": runtime.VOICE_NOTE}
     assert session["messages"] == [
         {"role": "user", "content": [{"text": CALL_CONNECTED}]},
         {"role": "assistant", "content": [{"text": GREETING}]},
     ]
 
 
-def test_tool_round_adds_the_session_after_the_model_chose_the_call(monkeypatch):
+def test_a_turn_streams_its_words_and_calls_tools_with_the_session(monkeypatch):
     bedrock = FakeBedrock([
-        ("tool_use", [{"toolUse": {"toolUseId": "t1", "name": "get_balance", "input": {"x": 1}}}]),
+        ("tool_use", [{"text": "Let me check."},
+                      {"toolUse": {"toolUseId": "t1", "name": "get_balance", "input": {"x": 1}}}]),
         ("end_turn", [{"text": "Your balance is 42 dollars."}]),
     ])
     calls = []
@@ -144,20 +190,38 @@ def test_tool_round_adds_the_session_after_the_model_chose_the_call(monkeypatch)
     monkeypatch.setattr(runtime.gateway, "call_tool", lambda name, args: calls.append((name, args)) or {"balance": 42})
     session = runtime._new_session(None)
 
-    reply, turn = runtime.take_turn(session, "sess-1", "what do I owe")
+    events = list(runtime.take_turn(session, "sess-1", "what do I owe"))
 
-    assert reply == "Your balance is 42 dollars."
+    assert [e["type"] for e in events if e["type"] != "text"] == ["round", "tool", "round", "turn"]
+    assert "".join(e["text"] for e in events if e["type"] == "text").split() == \
+        ["Let", "me", "check.", "Your", "balance", "is", "42", "dollars."]
+    turn = events[-1]["turn"]
     # The turn the pod reports: the caller's words, the tool call, its result, the reply.
     assert [m["role"] for m in turn["messages"]] == ["user", "assistant", "user", "assistant"]
+    assert turn["messages"][1]["content"][1] == {
+        "toolUse": {"toolUseId": "t1", "name": "get_balance", "input": {"x": 1}}}
     assert [r["output_index"] for r in turn["rounds"]] == [1, 3]
-    assert turn["rounds"][0]["input_tokens"] == 100
-    assert turn["system"] == [runtime.AGENT_PROMPT, session["system"][1]["text"]]
+    assert turn["rounds"][0]["input_tokens"] == 100  # cached tokens count as input
+    assert turn["system"] == [block["text"] for block in session["system"]]
     assert calls == [("get_balance", {"x": 1, SESSION_ARG: "sess-1"})]
     assert session["messages"][-2] == {
         "role": "user",
         "content": [{"toolResult": {"toolUseId": "t1", "content": [{"json": {"balance": 42}}]}}],
     }
-    assert bedrock.calls[0]["toolConfig"] == {"tools": runtime.CONVERSE_TOOLS}
+
+
+def test_requests_cache_the_prefix_but_the_history_stays_clean(monkeypatch):
+    bedrock = FakeBedrock([("end_turn", [{"text": "Sure."}])])
+    monkeypatch.setattr(runtime, "_bedrock", bedrock)
+    session = runtime._new_session(None)
+
+    list(runtime.take_turn(session, "sess-1", "hello"))
+
+    request = bedrock.calls[0]
+    assert request["system"][-1] == runtime.CACHE_POINT
+    assert request["messages"][-1]["content"][-1] == runtime.CACHE_POINT
+    assert request["toolConfig"] == {"tools": runtime.CONVERSE_TOOLS}
+    assert not any("cachePoint" in block for m in session["messages"] for block in m["content"])
 
 
 def test_tool_loop_that_never_settles_fails_loudly(monkeypatch):
@@ -166,12 +230,12 @@ def test_tool_loop_that_never_settles_fails_loudly(monkeypatch):
     monkeypatch.setattr(runtime.gateway, "call_tool", lambda name, args: {})
 
     with pytest.raises(RuntimeError, match="did not settle"):
-        runtime.take_turn(runtime._new_session(None), "sess-1", "hi")
+        list(runtime.take_turn(runtime._new_session(None), "sess-1", "hi"))
 
 
 def test_a_failed_turn_leaves_the_history_as_it_was(monkeypatch):
     class Refusing:
-        def converse(self, **kwargs):
+        def converse_stream(self, **kwargs):
             raise RuntimeError("ValidationException")
 
     monkeypatch.setattr(runtime, "_bedrock", Refusing())
@@ -179,21 +243,30 @@ def test_a_failed_turn_leaves_the_history_as_it_was(monkeypatch):
     before = [dict(m) for m in session["messages"]]
 
     with pytest.raises(RuntimeError):
-        runtime.take_turn(session, "sess-1", "hello")
+        list(runtime.take_turn(session, "sess-1", "hello"))
 
     assert session["messages"] == before
 
 
-def test_barge_in_rewrites_the_last_reply_to_what_was_heard(monkeypatch):
-    monkeypatch.setattr(runtime, "_bedrock", FakeBedrock([("end_turn", [{"text": "Sure."}])]))
+async def _drain(response) -> list[dict]:
+    body = b"".join([chunk.encode() if isinstance(chunk, str) else chunk async for chunk in response.body_iterator])
+    return [json.loads(e.removeprefix(b"data: ")) for e in body.split(b"\n\n") if e]
+
+
+def test_init_primes_the_cache_and_a_barge_in_rewrites_the_last_reply(monkeypatch):
+    bedrock = FakeBedrock([("end_turn", [{"text": "Sure."}])])
+    monkeypatch.setattr(runtime, "_bedrock", bedrock)
     runtime._sessions.clear()
     heard = "Thanks for calling" + INTERRUPTED_MARKER
 
-    runtime.invocations({"text": "I need help", ATTR_INTERRUPTED_REPLY: heard}, "sess-2")
+    assert runtime.invocations({"init": True, ATTR_REFERENCE_TIME: "2026-09-10T00:59:09Z"}, "sess-2") == {"ready": True}
+    assert bedrock.calls[0]["inferenceConfig"] == {"maxTokens": 1}
+    events = asyncio.run(_drain(runtime.invocations({"text": "I need help", ATTR_INTERRUPTED_REPLY: heard}, "sess-2")))
 
+    assert events[-1]["type"] == "turn"
     messages = runtime._sessions["sess-2"]["messages"]
     assert messages[1] == {"role": "assistant", "content": [{"text": heard}]}
-    assert messages[-1]["content"] == [{"text": "Sure."}]
+    assert messages[-1]["content"] == [{"text": "Sure. "}]
 
 
 def test_gateway_reads_a_tool_result_from_either_wire_shape():
@@ -212,14 +285,7 @@ class FakeTable:
         self.puts = []
         self.updates = []
 
-        class _Exceptions:
-            ConditionalCheckFailedException = type("ConditionalCheckFailedException", (Exception,), {})
-
-        self.meta = SimpleNamespace(client=SimpleNamespace(exceptions=_Exceptions))
-
     def put_item(self, **kwargs):
-        if self.item is not None:
-            raise self.meta.client.exceptions.ConditionalCheckFailedException()
         self.puts.append(kwargs)
         self.item = kwargs["Item"]
 
@@ -230,11 +296,6 @@ class FakeTable:
         self.updates.append(kwargs)
 
 
-def _lex_event(attrs):
-    return {"sessionId": "sess-3", "inputTranscript": "pay my bill",
-            "sessionState": {"sessionAttributes": attrs}}
-
-
 TWINS = {
     "stripe_api_base": "https://twin/stripe",
     "stripe_api_key": "sk_test_fixture",
@@ -243,51 +304,27 @@ TWINS = {
 }
 
 
-def test_fulfillment_writes_the_record_once_and_forwards_the_turn(monkeypatch):
+def test_init_writes_the_record_and_warms_the_agent_session(monkeypatch):
     table = FakeTable()
     sent = []
 
     class FakeRuntime:
         def invoke_agent_runtime(self, **kwargs):
             sent.append(kwargs)
-            return {"response": _Body(json.dumps({"reply": "Of course.", "turn": {"rounds": []}}).encode())}
+            return {"response": _Body(b'{"ready": true}')}
 
     monkeypatch.setattr(init_lambda, "_table", table)
     monkeypatch.setattr(init_lambda, "_runtime", FakeRuntime())
     monkeypatch.setenv("AGENTCORE_RUNTIME_ARN", "arn:runtime")
 
-    first = init_lambda.handler(_lex_event({**TWINS, ATTR_INTERRUPTED_REPLY: "Thanks" + INTERRUPTED_MARKER}), None)
-    assert json.loads(table.updates[0]["ExpressionAttributeValues"][":turn"]) == {"rounds": []}
-    init_lambda.handler(_lex_event(dict(TWINS)), None)
+    assert init_lambda.handler({"session_id": "sess-3", **TWINS}, None) == {"ready": True}
 
-    assert len(table.puts) == 1
-    assert len(table.updates) == 2  # one recorded turn per answered turn
+    assert table.puts[0]["ConditionExpression"] == "attribute_not_exists(session_id)"
     assert table.item["stripe_api_base"] == "https://twin/stripe"
+    assert table.item["failed_attempts"] == 0
     assert table.item["reference_time"] == "2026-09-10T00:59:09Z"
     assert sent[0]["runtimeSessionId"] == "sess-3"
-    assert json.loads(sent[0]["payload"]) == {
-        "text": "pay my bill",
-        ATTR_REFERENCE_TIME: "2026-09-10T00:59:09Z",
-        ATTR_INTERRUPTED_REPLY: "Thanks" + INTERRUPTED_MARKER,
-    }
-    assert first["messages"] == [{"contentType": "PlainText", "content": "Of course."}]
-    assert ATTR_INTERRUPTED_REPLY not in first["sessionState"]["sessionAttributes"]
-
-
-def test_fulfillment_stays_silent_on_a_blank_transcript(monkeypatch):
-    class NoRuntime:
-        def invoke_agent_runtime(self, **kwargs):
-            raise AssertionError("a blank turn must not reach the agent")
-
-    monkeypatch.setattr(init_lambda, "_table", FakeTable())
-    monkeypatch.setattr(init_lambda, "_runtime", NoRuntime())
-    event = _lex_event(dict(TWINS))
-    event["inputTranscript"] = "  "
-
-    response = init_lambda.handler(event, None)
-
-    assert "messages" not in response
-    assert response["sessionState"]["dialogAction"] == {"type": "ElicitIntent"}
+    assert json.loads(sent[0]["payload"]) == {"init": True, ATTR_REFERENCE_TIME: "2026-09-10T00:59:09Z"}
 
 
 # ------------------------------------------------------------ the tools Lambda
@@ -321,3 +358,21 @@ def test_tools_lambda_rebuilds_the_call_from_its_record_and_saves_verification(m
     assert update["ExpressionAttributeValues"] == {
         ":attempts": 1, ":account": json.dumps({"customer_id": "cus_1"}), ":client": 7,
     }
+
+
+def test_tools_lambda_keeps_one_fineract_client_per_twin(monkeypatch):
+    built = []
+
+    class CountingFineract:
+        def __init__(self):
+            built.append(tools_lambda.os.environ["FINERACT_API_BASE"])
+
+    monkeypatch.setattr(tools_lambda, "FineractClient", CountingFineract)
+    monkeypatch.setattr(tools_lambda, "_fineract", {})
+    monkeypatch.setattr(tools_lambda, "dispatch", lambda session, name, args: {})
+    for base in ("https://twin-a/fineract", "https://twin-a/fineract", "https://twin-b/fineract"):
+        monkeypatch.setattr(tools_lambda, "_table", FakeTable(
+            {**TWINS, "fineract_api_base": base, "session_id": "s", "failed_attempts": 0}))
+        tools_lambda.handler({SESSION_ARG: "s"}, _gateway_context("get_account"))
+
+    assert built == ["https://twin-a/fineract", "https://twin-b/fineract"]

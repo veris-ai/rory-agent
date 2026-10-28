@@ -8,12 +8,12 @@ Run from the repo root with AWS credentials for the target account. In order:
 2. tools Lambda (Rory's 16 tools through the shared dispatcher)
 3. AgentCore Gateway (MCP, IAM auth) with the tools Lambda as its target
 4. AgentCore Runtime (the agent container, built for arm64 and pushed to ECR)
-5. fulfillment Lambda (Lex → AgentCore)
-6. Lex V2 bot whose fallback intent is fulfilled by that Lambda, with a ``live`` alias
-7. IAM user the bench pod uses for Lex and Polly, and nothing else
+5. init Lambda (writes a call's session record and warms its AgentCore session)
+6. Lex V2 bot that only transcribes, with a ``live`` alias
+7. IAM user the bench pod uses for Lex, Polly, the init Lambda and the runtime, and nothing else
 
 Prints the values the pod needs. Re-running updates code and configuration in place;
-the Lex bot's language model is built once and only its alias's Lambda is updated.
+the Lex bot is built once.
 """
 
 from __future__ import annotations
@@ -160,7 +160,8 @@ def lambda_zip() -> bytes:
 def function(name: str, role_arn: str, handler: str, code: bytes, env: dict[str, str], timeout: int) -> str:
     config = {
         "FunctionName": name, "Role": role_arn, "Handler": handler, "Runtime": "python3.12",
-        "Timeout": timeout, "MemorySize": 512, "Environment": {"Variables": env},
+        # Lambda's CPU scales with memory; TLS to the twins and JSON want the CPU.
+        "Timeout": timeout, "MemorySize": 1024, "Environment": {"Variables": env},
     }
     try:
         lam.get_function(FunctionName=name)
@@ -328,8 +329,12 @@ def lex_role() -> str:
         return arn
 
 
-def bot(init_lambda_arn: str) -> tuple[str, str]:
-    """A Lex bot that only transcribes: every utterance falls back to the fulfillment Lambda."""
+def bot() -> tuple[str, str]:
+    """A Lex bot that only transcribes: every utterance falls to the fallback intent, which does nothing.
+
+    The pod reads the transcript off the conversation stream and takes it to the
+    agent itself, so the reply can stream back as it is generated.
+    """
     bots = [b for b in lex.list_bots()["botSummaries"] if b["botName"] == PREFIX]
     if bots:
         bot_id = bots[0]["botId"]
@@ -347,13 +352,6 @@ def bot(init_lambda_arn: str) -> tuple[str, str]:
         lex.create_intent(
             botId=bot_id, botVersion="DRAFT", localeId=LOCALE, intentName="Unused",
             sampleUtterances=[{"utterance": "rory agentcore placeholder intent never spoken"}],
-        )
-        fallback = next(i for i in lex.list_intents(botId=bot_id, botVersion="DRAFT", localeId=LOCALE)["intentSummaries"]
-                    if i.get("parentIntentSignature") == "AMAZON.FallbackIntent")
-        lex.update_intent(
-            botId=bot_id, botVersion="DRAFT", localeId=LOCALE, intentId=fallback["intentId"],
-            intentName=fallback["intentName"], parentIntentSignature="AMAZON.FallbackIntent",
-            fulfillmentCodeHook={"enabled": True},
         )
         lex.build_bot_locale(botId=bot_id, botVersion="DRAFT", localeId=LOCALE)
         wait_status("locale build", locale, "botLocaleStatus", "Built", ("Failed",))
@@ -376,8 +374,7 @@ def bot(init_lambda_arn: str) -> tuple[str, str]:
 
     wait_status("bot version", describe_version, "botStatus", "Available", ("Failed",))
 
-    locale_settings = {LOCALE: {"enabled": True, "codeHookSpecification": {
-        "lambdaCodeHook": {"lambdaARN": init_lambda_arn, "codeHookInterfaceVersion": "1.0"}}}}
+    locale_settings = {LOCALE: {"enabled": True}}
     aliases = [a for a in lex.list_bot_aliases(botId=bot_id)["botAliasSummaries"] if a["botAliasName"] == "live"]
     if aliases:
         alias_id = aliases[0]["botAliasId"]
@@ -389,24 +386,15 @@ def bot(init_lambda_arn: str) -> tuple[str, str]:
         log(f"created alias {alias_id}")
     wait_status("alias", lambda: lex.describe_bot_alias(botId=bot_id, botAliasId=alias_id), "botAliasStatus",
                 "Available", ("Failed",))
-
-    alias_arn = f"arn:aws:lex:{REGION}:{ACCOUNT}:bot-alias/{bot_id}/{alias_id}"
-    try:
-        lam.add_permission(
-            FunctionName=init_lambda_arn, StatementId="lex-live-alias", Action="lambda:InvokeFunction",
-            Principal="lexv2.amazonaws.com", SourceArn=alias_arn,
-        )
-    except lam.exceptions.ResourceConflictException:
-        pass  # granted on an earlier run
     return bot_id, alias_id
 
 
 # ---------------------------------------------------------------------- Bench user
 
 
-def bench_user(bot_id: str, alias_id: str, table_arn: str) -> str:
-    """The IAM user the bench pod signs in as: Lex on this alias, Polly, and reading
-    its call's session record back for the trace."""
+def bench_user(bot_id: str, alias_id: str, init_arn: str, runtime_arn: str) -> str:
+    """The IAM user the bench pod signs in as: Lex on this alias, Polly, the init
+    Lambda, and the agent runtime."""
     name = f"{PREFIX}-bench"
     try:
         iam.get_user(UserName=name)
@@ -414,9 +402,10 @@ def bench_user(bot_id: str, alias_id: str, table_arn: str) -> str:
         iam.create_user(UserName=name)
         log(f"created user {name}")
     iam.put_user_policy(UserName=name, PolicyName=f"{name}-inline", PolicyDocument=json.dumps(policy(
-        statement(["lex:RecognizeUtterance"], [f"arn:aws:lex:{REGION}:{ACCOUNT}:bot-alias/{bot_id}/{alias_id}"]),
+        statement(["lex:StartConversation"], [f"arn:aws:lex:{REGION}:{ACCOUNT}:bot-alias/{bot_id}/{alias_id}"]),
         statement(["polly:SynthesizeSpeech"], ["*"]),
-        statement(["dynamodb:GetItem"], [table_arn]),
+        statement(["lambda:InvokeFunction"], [init_arn]),
+        statement(["bedrock-agentcore:InvokeAgentRuntime"], [runtime_arn, f"{runtime_arn}/*"]),
     )))
     return name
 
@@ -442,7 +431,7 @@ def main() -> None:
     init_role = role(
         f"{PREFIX}-init-lambda", "lambda.amazonaws.com",
         policy(
-            statement(["dynamodb:PutItem", "dynamodb:UpdateItem"], [table_arn]),
+            statement(["dynamodb:PutItem"], [table_arn]),
             statement(["bedrock-agentcore:InvokeAgentRuntime"], [runtime_arn, f"{runtime_arn}/*"]),
         ),
         [LAMBDA_BASIC],
@@ -450,14 +439,14 @@ def main() -> None:
     init_arn = function(f"{PREFIX}-init", init_role, "rory_agentcore.init_lambda.handler", code,
                         {"SESSIONS_TABLE": TABLE, "AGENTCORE_RUNTIME_ARN": runtime_arn}, timeout=30)
 
-    bot_id, alias_id = bot(init_arn)
-    user = bench_user(bot_id, alias_id, table_arn)
+    bot_id, alias_id = bot()
+    user = bench_user(bot_id, alias_id, init_arn, runtime_arn)
 
     print(json.dumps({
         "AWS_REGION": REGION,
         "LEX_BOT_ID": bot_id,
         "LEX_BOT_ALIAS_ID": alias_id,
-        "SESSIONS_TABLE": TABLE,
+        "INIT_LAMBDA": f"{PREFIX}-init",
         "AGENTCORE_RUNTIME_ARN": runtime_arn,
         "GATEWAY_URL": gateway_url,
         "BENCH_IAM_USER": user,

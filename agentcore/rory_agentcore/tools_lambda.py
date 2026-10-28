@@ -17,11 +17,13 @@ from typing import Any
 import boto3
 
 from rory_tools import CallSession, dispatch
+from rory_tools.services.fineract_client import FineractClient
 from rory_tools.session import clients
 
 from .contract import SESSION_ARG
 
 _table = boto3.resource("dynamodb").Table(os.environ["SESSIONS_TABLE"])
+_fineract: dict[str, FineractClient] = {}
 
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
@@ -31,7 +33,10 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     record = _table.get_item(Key={"session_id": session_id}, ConsistentRead=True)["Item"]
 
     # A warm Lambda serves calls against different twins, so the vendor clients
-    # are rebuilt from this call's record every time.
+    # follow this call's record. Stripe's client only points the SDK's globals at
+    # the twin (the SDK keeps its connections itself), so it is rebuilt every time.
+    # Fineract's owns its connection pool, so it is kept per twin: a call's tools
+    # reuse open connections instead of a TLS handshake per request.
     os.environ["STRIPE_API_BASE"] = record["stripe_api_base"]
     os.environ["STRIPE_API_KEY"] = record["stripe_api_key"]
     os.environ["FINERACT_API_BASE"] = record["fineract_api_base"]
@@ -40,7 +45,9 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     else:
         os.environ.pop("RORY_REFERENCE_TIME", None)
     clients._stripe = None
-    clients._fineract = None
+    if record["fineract_api_base"] not in _fineract:
+        _fineract[record["fineract_api_base"]] = FineractClient()
+    clients._fineract = _fineract[record["fineract_api_base"]]
 
     session = CallSession()
     session.account = json.loads(record["account"]) if "account" in record else None
