@@ -112,15 +112,10 @@ async def run_voice_ws_bot(actor_ws: WebSocket) -> None:
                 raise RuntimeError(f"Phonic answered the config with {ready['type']}: {ready}")
 
             tool_calls: asyncio.Queue = asyncio.Queue()
-            interrupted: set[str] = set()
             tasks = [
                 asyncio.create_task(_pump_actor_to_phonic(actor_ws, ph_ws), name="actor->phonic"),
-                asyncio.create_task(
-                    _pump_phonic_to_actor(ph_ws, actor_ws, tool_calls, interrupted), name="phonic->actor"
-                ),
-                asyncio.create_task(
-                    _run_tool_calls(ph_ws, session_state, tool_calls, interrupted), name="tool-calls"
-                ),
+                asyncio.create_task(_pump_phonic_to_actor(ph_ws, actor_ws, tool_calls), name="phonic->actor"),
+                asyncio.create_task(_run_tool_calls(ph_ws, session_state, tool_calls), name="tool-calls"),
             ]
             try:
                 done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -181,9 +176,7 @@ async def _pump_actor_to_phonic(actor_ws: WebSocket, ph_ws) -> None:
         raise
 
 
-async def _pump_phonic_to_actor(
-    ph_ws, actor_ws: WebSocket, tool_calls: asyncio.Queue, interrupted: set[str]
-) -> None:
+async def _pump_phonic_to_actor(ph_ws, actor_ws: WebSocket, tool_calls: asyncio.Queue) -> None:
     """Phonic messages → audio bytes back to the actor; queue tool calls for the worker.
 
     This loop never waits on a tool, so audio and interruptions keep flowing while
@@ -231,9 +224,8 @@ async def _pump_phonic_to_actor(
                 await tool_calls.put(evt)
 
             elif etype == "tool_call_interrupted":
-                # Phonic cut the call off; its output would be stale, so the worker
-                # drops it instead of sending it.
-                interrupted.add(evt["tool_call_id"])
+                # Not expected: the shared tools are uninterruptible. The worker still
+                # sends the call's output, because a tool that has run has acted.
                 logger.warning(f"[ph->a] tool {evt['tool_name']} ({evt['tool_call_id']}) interrupted")
 
             elif etype == "conversation_created":
@@ -266,9 +258,7 @@ async def _pump_phonic_to_actor(
         logger.info("[ph->a] actor WS closed; ending Phonic receive loop")
 
 
-async def _run_tool_calls(
-    ph_ws, session_state: CallSession, tool_calls: asyncio.Queue, interrupted: set[str]
-) -> None:
+async def _run_tool_calls(ph_ws, session_state: CallSession, tool_calls: asyncio.Queue) -> None:
     """Run Phonic's tool calls one at a time and send each output back.
 
     The vendor clients are blocking and share account state, so calls run in order
@@ -277,23 +267,17 @@ async def _run_tool_calls(
     while True:
         evt = await tool_calls.get()
         try:
-            await _run_tool_call(ph_ws, session_state, evt, interrupted)
+            await _run_tool_call(ph_ws, session_state, evt)
         finally:
             tool_calls.task_done()
 
 
-async def _run_tool_call(ph_ws, session_state: CallSession, evt: dict, interrupted: set[str]) -> None:
-    """Run one tool call and send its output, unless Phonic interrupted it."""
+async def _run_tool_call(ph_ws, session_state: CallSession, evt: dict) -> None:
+    """Run one tool call and send its output."""
     call_id = evt["tool_call_id"]
     name = evt["tool_name"]
-    if call_id in interrupted:
-        logger.info(f"[ph->a] tool {name} ({call_id}) was interrupted before it ran; not run")
-        return
     result = await asyncio.to_thread(dispatch, session_state, name, evt["parameters"])
     logger.info(f"[ph->a] tool {name} ({call_id}) -> {json.dumps(result, default=str)}")
-    if call_id in interrupted:
-        logger.info(f"[ph->a] tool {name} ({call_id}) interrupted while running; output dropped")
-        return
     await ph_ws.send(json.dumps({
         "type": "tool_call_output",
         "tool_call_id": call_id,
