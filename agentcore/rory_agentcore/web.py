@@ -22,11 +22,15 @@ from .agent import resolve_vendor, run_voice_ws_bot
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     require_credentials(
-        "STRIPE_API_KEY",
+        "RORY_AGENTCORE_AWS_ACCESS_KEY_ID",
+        "RORY_AGENTCORE_AWS_SECRET_ACCESS_KEY",
         "AWS_REGION",
         "LEX_BOT_ID",
         "LEX_BOT_ALIAS_ID",
-        "AGENTCORE_RUNTIME_ARN",
+        "STRIPE_API_BASE",
+        "STRIPE_API_KEY",
+        "FINERACT_API_BASE",
+        "SESSIONS_TABLE",
     )
     resolve_vendor()
     yield

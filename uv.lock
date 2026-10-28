@@ -2521,12 +2521,14 @@ source = { editable = "agentcore" }
 dependencies = [
     { name = "boto3" },
     { name = "fastapi" },
+    { name = "opentelemetry-api" },
     { name = "rory-core", extra = ["vad"] },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
 [package.dev-dependencies]
 dev = [
+    { name = "opentelemetry-sdk" },
     { name = "pytest" },
 ]
 
@@ -2534,12 +2536,16 @@ dev = [
 requires-dist = [
     { name = "boto3", specifier = ">=1.40" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "opentelemetry-api", specifier = ">=1.27" },
     { name = "rory-core", extras = ["vad"], editable = "." },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=8.0" }]
+dev = [
+    { name = "opentelemetry-sdk", specifier = ">=1.27" },
+    { name = "pytest", specifier = ">=8.0" },
+]
 
 [[package]]
 name = "rory-cartesia"

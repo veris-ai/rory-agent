@@ -9,10 +9,11 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "boto3>=1.40",
+    "opentelemetry-api>=1.27",
 ]
 
 [dependency-groups]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "opentelemetry-sdk>=1.27"]
 
 [tool.uv.sources]
 rory-core = { workspace = true }

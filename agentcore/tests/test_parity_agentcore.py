@@ -1,14 +1,15 @@
-"""Amazon Connect candidate's own parity run.
+"""The AgentCore candidate's own parity run.
 
-The assertions live in ``rory_tools.parity`` and are the same ones every
-transport runs, checked against the shared declaration so this suite runs
-with only its own dependencies installed.
+The model runs in the AgentCore Runtime and the tools run in the tools Lambda, so
+those are the modules checked: the runtime must hand Bedrock the shared tools,
+prompt and greeting, and the tools Lambda must run them through the shared gate.
 """
 
 from __future__ import annotations
 
 import pytest
-from rory_agentcore import agent, tools
+from rory_agentcore import agent, runtime, tools, tools_lambda
+from rory_agentcore.contract import SESSION_ARG
 
 from rory_tools import SCHEMAS
 from rory_tools.parity import (
@@ -19,6 +20,7 @@ from rory_tools.parity import (
     assert_tool_names_match,
     assert_uses_shared_dispatcher,
 )
+from rory_tools.prompt import GREETING
 
 SURFACE = tools.tool_surface()
 
@@ -43,8 +45,22 @@ def test_argument_schemas_match(schema):
 
 
 def test_prompt_and_greeting_are_the_shared_ones():
-    assert_shares_prompt_and_greeting(agent)
+    assert_shares_prompt_and_greeting(runtime)
+    assert agent.GREETING is GREETING  # the pod speaks the same opening line
 
 
 def test_tool_calls_go_through_the_shared_gate():
-    assert_uses_shared_dispatcher(agent)
+    assert_uses_shared_dispatcher(tools_lambda)
+
+
+def test_model_never_sees_the_session_argument():
+    """The gateway needs the session; the model must not be the one supplying it."""
+    assert all(SESSION_ARG not in props["properties"] for props in SURFACE.values())
+    for gateway_tool, schema in zip(tools.GATEWAY_TOOLS, SCHEMAS, strict=True):
+        assert gateway_tool["name"] == schema.name
+        assert gateway_tool["description"] == schema.description
+        assert gateway_tool["inputSchema"]["properties"] == {
+            **{name: tools._for_gateway(prop) for name, prop in schema.properties.items()},
+            SESSION_ARG: {"type": "string", "description": "The call this tool runs for."},
+        }
+        assert gateway_tool["inputSchema"]["required"] == [*schema.required, SESSION_ARG]

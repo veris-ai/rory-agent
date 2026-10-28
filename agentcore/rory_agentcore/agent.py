@@ -1,29 +1,24 @@
-"""Rory on Amazon Connect's voice stack — Lex, AgentCore Runtime, Polly, cascaded.
+"""Rory on Amazon Connect's voice stack: the pod that stands where Connect would.
 
-Amazon Connect is a telephony front end that hands each turn to three services:
-Lex turns the caller's speech into text, a Bedrock AgentCore Runtime runs the
-model and its tools, and Polly speaks the reply. The bench does not dial a
-phone, so this process stands where Connect would and runs the same three legs
-over the Veris ``voice_ws`` socket. It owns turn-taking and barge-in, as the
-other cascades do.
+In the Connect pattern a call reaches Amazon Connect, Connect streams each caller
+turn to Lex, Lex transcribes it and hands it to a fulfillment Lambda, the Lambda
+invokes the agent in AgentCore Runtime, the agent reasons on Bedrock and calls
+its tools over MCP, and the reply comes back through Lex for Connect to speak.
 
-Everything below the transport is shared with the other agents: same prompt,
-same greeting, same frozen-clock date context, same tools, same dispatcher. The
-transport is the only thing allowed to differ.
+The bench does not dial a phone, so this process plays Connect's part over the
+Veris ``voice_ws`` socket: it decides when the caller's turn is over, sends the
+turn's audio to Lex, and speaks the reply Lex returns with Polly, the engine
+behind Connect's voices. It owns turn-taking and barge-in, as the other cascades
+do. Everything after Lex (the fulfillment Lambda, the runtime, the gateway, the
+tools Lambda) runs in AWS; see ``init_lambda``, ``runtime`` and ``tools_lambda``.
 
-The AgentCore Runtime is the one leg not in this repository. It is a deployed
-agent that takes one model round per request:
+Each Lex request carries session attributes: the twins the bench injected into
+this pod, which the tools Lambda must use, the bench's frozen clock, and, after a
+barge-in, the part of the last reply the caller actually heard.
 
-    request   {"messages": [...], "tools": [{name, description, parameters}]}
-    response  {"content": str | null, "tool_calls": [{id, name, arguments}]}
-
-It calls Bedrock with those tools. When the model asks for tools, they come
-back in ``tool_calls`` and this process runs them through the shared dispatcher
-locally, because verification and payment state live here, not in the runtime.
-
-Sample-rate note: the actor speaks and listens at 24 kHz PCM16. Lex accepts
-16 kHz linear PCM and Polly's PCM output is 16 kHz, so audio is resampled at
-both boundaries.
+Sample-rate note: the actor speaks and listens at 24 kHz PCM16. Lex accepts 16 kHz
+linear PCM and Polly's PCM output is 16 kHz, so audio is resampled at both
+boundaries.
 """
 
 from __future__ import annotations
@@ -42,13 +37,19 @@ import boto3
 from loguru import logger
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from rory_tools import CallSession, dispatch
-from rory_tools.prompt import GREETING, load_agent_prompt, today_context
+from rory_tools.prompt import GREETING
 from rory_tools.vad import SileroVad
 
-from .tools import TOOLS
-
-AGENT_PROMPT = load_agent_prompt()
+from . import trace
+from .contract import (
+    ATTR_FINERACT_API_BASE,
+    ATTR_INTERRUPTED_REPLY,
+    ATTR_REFERENCE_TIME,
+    ATTR_STRIPE_API_BASE,
+    ATTR_STRIPE_API_KEY,
+    CALL_CONNECTED,
+    INTERRUPTED_MARKER,
+)
 
 LEX_LOCALE_ID = os.environ.get("LEX_LOCALE_ID", "en_US")
 POLLY_VOICE_ID = os.environ.get("POLLY_VOICE_ID", "Joanna")
@@ -73,36 +74,41 @@ PRE_ROLL_BYTES = 300 * BYTES_PER_MS
 PLAYBACK_CHUNK_BYTES = 500 * BYTES_PER_MS
 PLAYBACK_LEAD_S = 1.0
 
-# Appended to a reply the caller talked over, so the model reads its own history
-# as cut off rather than said.
-INTERRUPTED_MARKER = "… [interrupted by the caller]"
-
-# A turn that still wants tools after this many model rounds is looping.
-MAX_TOOL_ROUNDS = 5
-
 # Set once per process by resolve_vendor, after the credential check.
 _lex: Any
 _polly: Any
-_agentcore: Any
+_sessions: Any
 _bot_id: str
 _bot_alias_id: str
-_runtime_arn: str
+_twins: dict[str, str]
 
 
 def resolve_vendor() -> None:
-    """Build the AWS clients once per process."""
-    global _lex, _polly, _agentcore, _bot_id, _bot_alias_id, _runtime_arn
-    region = os.environ["AWS_REGION"]
-    _lex = boto3.client("lexv2-runtime", region_name=region)
-    _polly = boto3.client("polly", region_name=region)
-    _agentcore = boto3.client("bedrock-agentcore", region_name=region)
+    """Build the AWS clients and read this attempt's twins, once per process.
+
+    The AWS key has its own names rather than the SDK's defaults: on the bench it
+    sits in candidate-env, which every candidate on the bench receives, and the
+    default names would hand it to any other candidate's AWS SDK.
+    """
+    global _lex, _polly, _sessions, _bot_id, _bot_alias_id, _twins
+    session = boto3.Session(
+        aws_access_key_id=os.environ["RORY_AGENTCORE_AWS_ACCESS_KEY_ID"],
+        aws_secret_access_key=os.environ["RORY_AGENTCORE_AWS_SECRET_ACCESS_KEY"],
+        region_name=os.environ["AWS_REGION"],
+    )
+    _lex = session.client("lexv2-runtime")
+    _polly = session.client("polly")
+    _sessions = session.resource("dynamodb").Table(os.environ["SESSIONS_TABLE"])
     _bot_id = os.environ["LEX_BOT_ID"]
     _bot_alias_id = os.environ["LEX_BOT_ALIAS_ID"]
-    _runtime_arn = os.environ["AGENTCORE_RUNTIME_ARN"]
-    logger.info(
-        f"[startup] stt=lex polly={POLLY_VOICE_ID}/{POLLY_ENGINE} "
-        f"llm=agentcore region={region}"
-    )
+    _twins = {
+        ATTR_STRIPE_API_BASE: os.environ["STRIPE_API_BASE"],
+        ATTR_STRIPE_API_KEY: os.environ["STRIPE_API_KEY"],
+        ATTR_FINERACT_API_BASE: os.environ["FINERACT_API_BASE"],
+    }
+    if "RORY_REFERENCE_TIME" in os.environ:
+        _twins[ATTR_REFERENCE_TIME] = os.environ["RORY_REFERENCE_TIME"]
+    logger.info(f"[startup] lex={_bot_id}/{_bot_alias_id} polly={POLLY_VOICE_ID}/{POLLY_ENGINE}")
 
 
 def _to_rate(pcm16: bytes, src_hz: int, dst_hz: int) -> bytes:
@@ -110,33 +116,38 @@ def _to_rate(pcm16: bytes, src_hz: int, dst_hz: int) -> bytes:
     return converted
 
 
-def _recognize(session_id: str, pcm16_16k: bytes) -> str:
-    """One caller turn through Lex, as a single buffered utterance."""
+def _encode(value: Any) -> str:
+    """Lex's compressed fields: JSON, gzipped, then base64."""
+    return base64.b64encode(gzip.compress(json.dumps(value).encode())).decode()
+
+
+def _decode(value: str) -> Any:
+    return gzip.decompress(base64.b64decode(value)).decode()
+
+
+def _recognize(session_id: str, pcm16_16k: bytes, attrs: dict[str, str]) -> tuple[str, str]:
+    """One caller turn through Lex and the agent behind it: (what Lex heard, what Rory says)."""
     resp = _lex.recognize_utterance(
         botId=_bot_id,
         botAliasId=_bot_alias_id,
         localeId=LEX_LOCALE_ID,
         sessionId=session_id,
+        sessionState=_encode({"sessionAttributes": attrs}),
         requestContentType=f"audio/l16; rate={LEX_RATE_HZ}; channels=1",
-        # Text back, so Lex does not synthesise a reply we would discard.
+        # Text back: the pod speaks the reply itself, as Connect would.
         responseContentType="text/plain; charset=utf-8",
         inputStream=pcm16_16k,
     )
     resp["audioStream"].close()
-    # Lex sends the transcript gzipped and base64-encoded in a header.
-    return gzip.decompress(base64.b64decode(resp["inputTranscript"])).decode()
+    transcript = json.loads(_decode(resp["inputTranscript"]))
+    messages = json.loads(_decode(resp["messages"])) if "messages" in resp else []
+    return transcript, " ".join(m["content"] for m in messages).strip()
 
 
-def _agent_turn(session_id: str, messages: list[dict]) -> dict:
-    """One model round in AgentCore Runtime."""
-    resp = _agentcore.invoke_agent_runtime(
-        agentRuntimeArn=_runtime_arn,
-        runtimeSessionId=session_id,
-        contentType="application/json",
-        accept="application/json",
-        payload=json.dumps({"messages": messages, "tools": TOOLS}).encode(),
-    )
-    return json.loads(resp["response"].read())
+def _read_turn(session_id: str) -> tuple[int, dict[str, Any]]:
+    """The last turn the agent took on this call, as the fulfillment Lambda recorded it."""
+    item = _sessions.get_item(Key={"session_id": session_id}, ConsistentRead=True)["Item"]
+    return int(item["turn_seq"]), json.loads(item["last_turn"])
 
 
 def _synthesize(text: str) -> tuple[list[dict], bytes]:
@@ -176,28 +187,29 @@ async def run_voice_ws_bot(actor_ws: WebSocket) -> None:
 
 
 class _Call:
-    """The pipeline for one call: actor audio in, Lex turns, AgentCore rounds, Polly out.
+    """One call: actor audio in, Lex turns out, Polly replies back.
 
     Two tasks run against this state: the actor pump, which does VAD and cuts
-    the caller's audio into turns, and the turn worker, which transcribes and
-    answers them one at a time. The worker is the only writer of ``messages``,
-    so a caller who talks over a reply cannot race the history.
+    the caller's audio into turns, and the turn worker, which sends them to Lex
+    one at a time and speaks the replies.
 
-    A fresh ``CallSession`` per call, so the account ``verify_caller`` matched
-    dies with the call and identity never becomes a model argument.
+    The conversation lives in the AgentCore Runtime, keyed by this call's session.
+    This process keeps a copy in step with it, only to report the agent's trace,
+    and a barge-in it has not yet reported: the reply as the caller heard it, sent
+    with the next turn.
     """
 
     def __init__(self, actor_ws: WebSocket) -> None:
         self.actor_ws = actor_ws
-        self.session = CallSession()
-        # Lex and AgentCore sessions are one per call, as the Connect contact is.
+        # One Lex session and one AgentCore session per call, as one Connect contact.
         self.session_id = str(uuid.uuid4())
-        # The date context is a second system message rather than part of the
-        # shared prompt because it is resolved per call, off the frozen clock.
-        self.messages: list[dict] = [
-            {"role": "system", "content": AGENT_PROMPT},
-            {"role": "system", "content": today_context()},
+        self._heard: str | None = None  # last reply as heard, after a barge-in
+        # The runtime's history, seeded the same way, for the trace.
+        self._history: list[dict] = [
+            {"role": "user", "content": [{"text": CALL_CONNECTED}]},
+            {"role": "assistant", "content": [{"text": GREETING}]},
         ]
+        self._turn_seq = 0
 
         self._vad = SileroVad(ACTOR_RATE_HZ)
         self._voiced = False
@@ -268,63 +280,43 @@ class _Call:
 
     async def _turn_worker(self) -> None:
         """Greet, then answer caller turns strictly one at a time."""
-        # Rory speaks first, straight through Polly rather than through the model,
-        # so the opening words are verbatim. It is not interruptible: a barge-in
-        # during the greeting would leave the caller with silence.
+        # Rory speaks first, straight through Polly, so the opening words are
+        # verbatim. The runtime seeds its history with the same greeting. It is not
+        # interruptible: a barge-in during the greeting would leave silence.
         logger.info("[turn] speaking greeting (agent greets first)")
         await self._say(GREETING)
-        self.messages.append({"role": "assistant", "content": GREETING, "tool_calls": []})
 
         while True:
             audio = await self._turns.get()
-            text = await asyncio.to_thread(
-                _recognize, self.session_id, _to_rate(audio, ACTOR_RATE_HZ, LEX_RATE_HZ)
-            )
-            logger.info(f"[stt] caller_said: {text}")
-            if text.strip():
-                await self._take_turn(text)
-
-    async def _take_turn(self, text: str) -> None:
-        """One caller turn: AgentCore rounds with tools, then the spoken reply."""
-        self.messages.append({"role": "user", "content": text})
-
-        for _ in range(MAX_TOOL_ROUNDS):
+            attrs = dict(_twins)
+            if self._heard is not None:
+                attrs[ATTR_INTERRUPTED_REPLY] = self._heard
             t0 = time.monotonic()
-            reply = await asyncio.to_thread(_agent_turn, self.session_id, self.messages)
-            self.messages.append(
-                {"role": "assistant", "content": reply["content"], "tool_calls": reply["tool_calls"]}
+            transcript, reply = await asyncio.to_thread(
+                _recognize, self.session_id, _to_rate(audio, ACTOR_RATE_HZ, LEX_RATE_HZ), attrs
             )
-            logger.info(
-                f"[llm] agentcore replied in {time.monotonic() - t0:.2f}s "
-                f"({len(reply['tool_calls'])} tool calls)"
-            )
-            if not reply["tool_calls"]:
-                break
-            # One at a time, in the order emitted: calls share verification and
-            # payment state on the session.
-            for call in reply["tool_calls"]:
-                self.messages.append(await self._run_tool(call))
-        else:
-            raise RuntimeError(f"tool loop did not settle in {MAX_TOOL_ROUNDS} rounds")
+            logger.info(f"[lex] {time.monotonic() - t0:.2f}s caller_said: {transcript!r}")
+            # No reply means nothing was transcribed and the agent never ran, so a
+            # pending barge-in is still unreported.
+            if not reply:
+                continue
+            await self._report_turn()
+            logger.info(f"[lex] rory_said: {reply}")
+            await self._speak(reply)
 
-        if reply["content"]:
-            logger.info(f"[llm] rory_said: {reply['content']}")
-            await self._speak(reply["content"])
-
-    async def _run_tool(self, call: dict) -> dict:
-        # The vendor clients are blocking. Called inline, a slow lookup would
-        # stall the loop carrying the caller's audio.
-        result = await asyncio.to_thread(dispatch, self.session, call["name"], call["arguments"])
-        logger.info(f"[tool] {call['name']} -> {json.dumps(result, default=str)}")
-        return {
-            "role": "tool",
-            "tool_call_id": call["id"],
-            "name": call["name"],
-            "content": json.dumps(result, default=str),
-        }
+    async def _report_turn(self) -> None:
+        """Export the agent's model rounds for the turn it just took."""
+        seq, turn = await asyncio.to_thread(_read_turn, self.session_id)
+        if seq != self._turn_seq + 1:
+            raise RuntimeError(f"expected agent turn {self._turn_seq + 1}, the record holds {seq}")
+        self._turn_seq = seq
+        if self._heard is not None:
+            self._history[-1] = {"role": "assistant", "content": [{"text": self._heard}]}
+            self._heard = None
+        trace.report_turn(self._history, turn)
 
     async def _speak(self, text: str) -> None:
-        """Speak the last assistant message, cancellable by barge-in."""
+        """Speak a reply, cancellable by barge-in."""
         self._speaking = asyncio.create_task(self._say(text))
         try:
             await self._speaking
@@ -334,27 +326,20 @@ class _Call:
             # ending mid-reply) must propagate, or the worker never exits.
             if asyncio.current_task().cancelling():
                 raise
-            self._trim_interrupted_reply(text)
+            self._heard = self._heard_part(text) + INTERRUPTED_MARKER
+            logger.info(f'[voice] barge-in: caller heard "{self._heard[:80]}"')
         finally:
             self._speaking = None
 
-    def _trim_interrupted_reply(self, text: str) -> None:
-        """Rewrite the last assistant message to the part of ``text`` that the caller heard."""
-        if self._sent_bytes == 0:
-            self.messages.pop()
-            logger.info("[voice] barge-in: dropped reply, nothing sent before the cut")
-            return
+    def _heard_part(self, text: str) -> str:
+        """The part of ``text`` the caller heard before the cut.
+
+        A word counts as heard once it has started playing. Polly's ``end`` is a
+        character offset into the text, so the kept text is exact.
+        """
         heard_ms = self._sent_bytes // BYTES_PER_MS
-        # A word counts as heard once it has started playing before the cut. Polly's
-        # `end` is a character offset into the text, so the kept text is exact.
         heard = [mark for mark in self._marks if mark["time"] < heard_ms]
-        kept = text[: heard[-1]["end"]] if heard else ""
-        self.messages[-1] = {
-            "role": "assistant",
-            "content": f"{kept}{INTERRUPTED_MARKER}",
-            "tool_calls": [],
-        }
-        logger.info(f'[voice] barge-in: trimmed reply to {heard_ms} ms ("{kept[:60]}")')
+        return text[: heard[-1]["end"]] if heard else ""
 
     async def _say(self, text: str) -> None:
         """One Polly reply, sent to the actor in slices paced against playback."""
