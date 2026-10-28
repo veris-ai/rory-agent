@@ -26,6 +26,7 @@ members = [
     "rory-livekit",
     "rory-mistral",
     "rory-openai-realtime",
+    "rory-phonic",
     "rory-pipecat",
     "rory-polyai",
     "rory-smallest",
@@ -2540,6 +2541,7 @@ dev = [
     { name = "rory-livekit" },
     { name = "rory-mistral" },
     { name = "rory-openai-realtime" },
+    { name = "rory-phonic" },
     { name = "rory-pipecat" },
     { name = "rory-polyai" },
     { name = "rory-smallest" },
@@ -2579,6 +2581,7 @@ dev = [
     { name = "rory-livekit", editable = "livekit" },
     { name = "rory-mistral", editable = "mistral" },
     { name = "rory-openai-realtime", editable = "openai-realtime" },
+    { name = "rory-phonic", editable = "phonic" },
     { name = "rory-pipecat", editable = "pipecat" },
     { name = "rory-polyai", editable = "polyai" },
     { name = "rory-smallest", editable = "smallest" },
@@ -3010,6 +3013,33 @@ dev = [{ name = "pytest", specifier = ">=8.0" }]
 name = "rory-openai-realtime"
 version = "0.1.0"
 source = { editable = "openai-realtime" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "rory-core" },
+    { name = "uvicorn", extra = ["standard"] },
+    { name = "websockets" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "rory-core", editable = "." },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+    { name = "websockets", specifier = ">=13" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=8.0" }]
+
+[[package]]
+name = "rory-phonic"
+version = "0.1.0"
+source = { editable = "phonic" }
 dependencies = [
     { name = "fastapi" },
     { name = "rory-core" },
