@@ -49,6 +49,7 @@ wrong.
 | [`smallest`](smallest/) | Smallest AI's Pulse STT and Lightning TTS around Electron, its own OpenAI-compatible chat model — a hand-rolled cascade, one `SMALLEST_API_KEY` for all three legs, no audio resampling since Pulse and Lightning both run at the actor's 24 kHz |
 | [`dialt`](dialt/) | Dialt's managed voice API over a WebSocket; `DIALT_BRAIN` selects Dialt Fast or Dialt Smart, with Rory's tools dispatched locally |
 | [`phonic`](phonic/) | Phonic speech-to-speech over its conversation websocket — one `config` per call carrying the shared prompt, greeting and tools as inline `custom_websocket` tools, Rory's tools answered by the pod with `tool_call_output` |
+| [`agentcore`](agentcore/) | Amazon Connect's voice stack — Lex for speech-to-text, Bedrock AgentCore Runtime for the model and tool rounds, Polly for speech — a hand-rolled cascade, Rory's tools dispatched locally |
 
 Each ships as its own image, built from one shared lockfile with
 `uv sync --package`, so a candidate carries only its own voice SDK. Most have
@@ -69,7 +70,7 @@ gemini-live/   Gemini Live transport
 gemini-live-xt-thinking/   Gemini 3.8 Live Extended Thinking (copy of gemini-live)
 openai-realtime/, deepgram/, elevenlabs/, elevenlabs-realtime/, livekit/, mistral/, fluxions/, huggingface/,
 grok-voice/, vapi/, cartesia/, gradium/, polyai/, gpt-live/,
-grok-cascade/, smallest/, dialt/, phonic/  eighteen more transports, same contract
+grok-cascade/, smallest/, dialt/, phonic/, agentcore/  nineteen more transports, same contract
 ```
 
 A transport is expected to use three things — `SCHEMAS`, `CallSession`, and
