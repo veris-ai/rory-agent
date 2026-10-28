@@ -2,8 +2,8 @@
 
 The assertions live in ``rory_tools.parity`` and are the same ones every
 transport runs. Keeping them here, rather than in a suite that imports all
-transports at once, is what lets this transport ship its own image and its own
-lockfile without needing any other voice SDK resolvable alongside it.
+transports at once, means this transport's tests run with only its own voice SDK
+installed.
 """
 
 from __future__ import annotations
@@ -61,9 +61,9 @@ def test_tool_calls_go_through_the_shared_gate():
 def test_config_keeps_the_shared_turn_taking_and_audio():
     """The Phonic config the run depends on, pinned.
 
-    Audio in and out at 24 kHz to match the actor, 800 ms of end-of-turn silence
-    like every other transport, the shared greeting spoken first, the shared tools
-    handed over unchanged, and Phonic's built-in turn-taking tool after them.
+    Audio in and out at 24 kHz to match the actor, 800 ms of end-of-turn silence,
+    the shared greeting spoken first, the shared tools handed over unchanged, and
+    Phonic's built-in turn-taking tool after them.
     """
     config = agent._config()
     assert config["type"] == "config"
