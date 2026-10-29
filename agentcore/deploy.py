@@ -9,7 +9,7 @@ Run from the repo root with AWS credentials for the target account. In order:
 3. AgentCore Gateway (MCP, IAM auth) with the tools Lambda as its target
 4. AgentCore Runtime (the agent container, built for arm64 and pushed to ECR)
 5. init Lambda (writes a call's session record and warms its AgentCore session)
-6. Lex V2 bot that only transcribes, with a ``live`` alias
+6. Lex hook Lambda, and a Lex V2 bot that only transcribes, with a ``live`` alias
 7. IAM user the bench pod uses for Lex, Polly, the init Lambda and the runtime, and nothing else
 
 Prints the values the pod needs. Re-running updates code and configuration in place;
@@ -73,7 +73,7 @@ def wait_status(what: str, fetch, key: str, ready: str, failed: tuple[str, ...] 
 # --------------------------------------------------------------------------- IAM
 
 
-def role(name: str, service: str, policy: dict, managed: list[str] = ()) -> str:
+def role(name: str, service: str, policy: dict | None, managed: list[str] = ()) -> str:
     trust = {
         "Version": "2012-10-17",
         "Statement": [{
@@ -89,7 +89,8 @@ def role(name: str, service: str, policy: dict, managed: list[str] = ()) -> str:
     except iam.exceptions.NoSuchEntityException:
         arn = iam.create_role(RoleName=name, AssumeRolePolicyDocument=json.dumps(trust))["Role"]["Arn"]
         log(f"created role {name}")
-    iam.put_role_policy(RoleName=name, PolicyName=f"{name}-inline", PolicyDocument=json.dumps(policy))
+    if policy is not None:
+        iam.put_role_policy(RoleName=name, PolicyName=f"{name}-inline", PolicyDocument=json.dumps(policy))
     for policy_arn in managed:
         iam.attach_role_policy(RoleName=name, PolicyArn=policy_arn)
     return arn
@@ -147,7 +148,7 @@ def lambda_zip() -> bytes:
         shutil.copytree(ROOT / "rory_tools", build / "rory_tools", ignore=shutil.ignore_patterns("__pycache__", "data"))
         pkg = build / "rory_agentcore"
         pkg.mkdir()
-        for name in ("__init__.py", "contract.py", "tools.py", "tools_lambda.py", "init_lambda.py"):
+        for name in ("__init__.py", "contract.py", "tools.py", "tools_lambda.py", "init_lambda.py", "lex_hook.py"):
             shutil.copy(ROOT / "agentcore" / "rory_agentcore" / name, pkg / name)
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -329,11 +330,13 @@ def lex_role() -> str:
         return arn
 
 
-def bot() -> tuple[str, str]:
-    """A Lex bot that only transcribes: every utterance falls to the fallback intent, which does nothing.
+def bot(hook_arn: str) -> tuple[str, str]:
+    """A Lex bot that only transcribes: every utterance falls to the fallback intent,
+    whose hook asks for the caller's next turn and nothing else.
 
     The pod reads the transcript off the conversation stream and takes it to the
-    agent itself, so the reply can stream back as it is generated.
+    agent itself, so the reply can stream back as it is generated. The hook keeps
+    the dialog open; without it Lex closes it after every utterance.
     """
     bots = [b for b in lex.list_bots()["botSummaries"] if b["botName"] == PREFIX]
     if bots:
@@ -352,6 +355,13 @@ def bot() -> tuple[str, str]:
         lex.create_intent(
             botId=bot_id, botVersion="DRAFT", localeId=LOCALE, intentName="Unused",
             sampleUtterances=[{"utterance": "rory agentcore placeholder intent never spoken"}],
+        )
+        fallback = next(i for i in lex.list_intents(botId=bot_id, botVersion="DRAFT", localeId=LOCALE)["intentSummaries"]
+                        if i.get("parentIntentSignature") == "AMAZON.FallbackIntent")
+        lex.update_intent(
+            botId=bot_id, botVersion="DRAFT", localeId=LOCALE, intentId=fallback["intentId"],
+            intentName=fallback["intentName"], parentIntentSignature="AMAZON.FallbackIntent",
+            fulfillmentCodeHook={"enabled": True},
         )
         lex.build_bot_locale(botId=bot_id, botVersion="DRAFT", localeId=LOCALE)
         wait_status("locale build", locale, "botLocaleStatus", "Built", ("Failed",))
@@ -374,7 +384,8 @@ def bot() -> tuple[str, str]:
 
     wait_status("bot version", describe_version, "botStatus", "Available", ("Failed",))
 
-    locale_settings = {LOCALE: {"enabled": True}}
+    locale_settings = {LOCALE: {"enabled": True, "codeHookSpecification": {
+        "lambdaCodeHook": {"lambdaARN": hook_arn, "codeHookInterfaceVersion": "1.0"}}}}
     aliases = [a for a in lex.list_bot_aliases(botId=bot_id)["botAliasSummaries"] if a["botAliasName"] == "live"]
     if aliases:
         alias_id = aliases[0]["botAliasId"]
@@ -386,6 +397,15 @@ def bot() -> tuple[str, str]:
         log(f"created alias {alias_id}")
     wait_status("alias", lambda: lex.describe_bot_alias(botId=bot_id, botAliasId=alias_id), "botAliasStatus",
                 "Available", ("Failed",))
+
+    alias_arn = f"arn:aws:lex:{REGION}:{ACCOUNT}:bot-alias/{bot_id}/{alias_id}"
+    try:
+        lam.add_permission(
+            FunctionName=hook_arn, StatementId=f"lex-{bot_id}-{alias_id}", Action="lambda:InvokeFunction",
+            Principal="lexv2.amazonaws.com", SourceArn=alias_arn,
+        )
+    except lam.exceptions.ResourceConflictException:
+        pass  # granted on an earlier run
     return bot_id, alias_id
 
 
@@ -439,7 +459,9 @@ def main() -> None:
     init_arn = function(f"{PREFIX}-init", init_role, "rory_agentcore.init_lambda.handler", code,
                         {"SESSIONS_TABLE": TABLE, "AGENTCORE_RUNTIME_ARN": runtime_arn}, timeout=30)
 
-    bot_id, alias_id = bot()
+    hook_role = role(f"{PREFIX}-lex-hook-lambda", "lambda.amazonaws.com", None, [LAMBDA_BASIC])
+    hook_arn = function(f"{PREFIX}-lex-hook", hook_role, "rory_agentcore.lex_hook.handler", code, {}, timeout=5)
+    bot_id, alias_id = bot(hook_arn)
     user = bench_user(bot_id, alias_id, init_arn, runtime_arn)
 
     print(json.dumps({

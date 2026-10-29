@@ -45,10 +45,13 @@ from aws_sdk_lex_runtime_v2.config import AsyncLexRuntimeV2Config
 from aws_sdk_lex_runtime_v2.models import (
     AudioInputEvent,
     ConfigurationEvent,
+    PlaybackCompletionEvent,
     SessionState,
     StartConversationInput,
     StartConversationRequestEventStreamAudioInputEvent,
     StartConversationRequestEventStreamConfigurationEvent,
+    StartConversationRequestEventStreamPlaybackCompletionEvent,
+    StartConversationResponseEventStreamTextResponseEvent,
     StartConversationResponseEventStreamTranscriptEvent,
 )
 from loguru import logger
@@ -89,6 +92,10 @@ LEX_SESSION_ATTRIBUTES = {
     # few seconds ends the stream while the caller listens to a long reply.
     "x-amz-lex:audio:start-timeout-ms:*:*": "900000",
 }
+
+# Lex ends a conversation at 15 minutes, a hard quota. The pod starts a new one
+# on the same session before then, in a pause, so the call can run longer.
+LEX_STREAM_MAX_S = 14 * 60
 
 # Voice onset after this much silence counts as the caller starting to speak again.
 END_OF_SPEECH_S = 0.8
@@ -160,9 +167,11 @@ async def _open_lex(session_id: str):
         conversation_mode="AUDIO",
     ))
     await stream.input_stream.send(StartConversationRequestEventStreamConfigurationEvent(ConfigurationEvent(
-        # Text back, and no audio: the pod speaks the reply itself, as Connect would.
+        # Text back, not audio: the pod speaks the agent's reply itself. Playback
+        # stays on, as Connect runs it: after each response Lex waits for the
+        # client to say the prompt has played before it takes the next turn. With
+        # playback disabled Lex loops on its own prompt and fails the stream.
         response_content_type="text/plain; charset=utf-8",
-        disable_playback=True,
         session_state=SessionState(session_attributes=LEX_SESSION_ATTRIBUTES),
     )))
     return stream
@@ -288,12 +297,16 @@ class _Call:
         self._silence_s = 0.0
         self._resample_state = None
         self._lex: Any = None
+        self._lex_opened_at = 0.0
+        self._lex_ready = asyncio.Event()  # clear while the stream is being replaced
         self._transcripts: asyncio.Queue[str] = asyncio.Queue()
         self._speaking: asyncio.Task | None = None  # the reply in progress, once its audio has started
         self._play_end = 0.0  # when the audio handed to the actor so far finishes playing
 
     async def run(self) -> None:
         self._lex = await _open_lex(self.session_id)
+        self._lex_opened_at = time.monotonic()
+        self._lex_ready.set()
         tasks = [
             asyncio.create_task(self._pump_actor(), name="actor->lex"),
             asyncio.create_task(self._read_lex(), name="lex->turns"),
@@ -317,6 +330,8 @@ class _Call:
             while True:
                 frame = await self.actor_ws.receive_bytes()
                 n_frames += 1
+                if not self._voiced and time.monotonic() - self._lex_opened_at > LEX_STREAM_MAX_S:
+                    await self._renew_lex()
                 audio, self._resample_state = audioop.ratecv(
                     frame, 2, 1, ACTOR_RATE_HZ, LEX_RATE_HZ, self._resample_state
                 )
@@ -337,6 +352,16 @@ class _Call:
                 f"[voice] actor disconnected after {n_frames} frames: code={getattr(exc, 'code', '?')}"
             )
 
+    async def _renew_lex(self) -> None:
+        """A new Lex stream on the same session. The old one closes first: Lex refuses
+        two streams on one session."""
+        logger.info("[lex] renewing the conversation stream before Lex's 15-minute limit")
+        self._lex_ready.clear()
+        await self._lex.close()
+        self._lex = await _open_lex(self.session_id)
+        self._lex_opened_at = time.monotonic()
+        self._lex_ready.set()
+
     def _on_voice_onset(self) -> None:
         logger.info("[vad] caller started speaking")
         if self._speaking is not None and not self._speaking.done():
@@ -345,18 +370,36 @@ class _Call:
 
     async def _read_lex(self) -> None:
         """Lex's transcripts, one per caller turn, onto the turn queue."""
-        _, events = await self._lex.await_output()
-        async for event in events:
-            if isinstance(event, StartConversationResponseEventStreamTranscriptEvent):
-                text = event.value.transcript or ""
-                logger.info(f"[lex] caller_said: {text!r}")
-                # Noise Lex took for speech arrives with nothing transcribed. There
-                # is no turn to answer, and Bedrock refuses a blank message.
-                if text.strip():
-                    await self._transcripts.put(text)
-            elif type(event).__name__.endswith("Exception"):
-                raise RuntimeError(f"Lex stream failed: {event.value}")
-        raise RuntimeError("Lex closed the conversation stream")
+        while True:
+            await self._lex_ready.wait()
+            stream = self._lex
+            _, events = await stream.await_output()
+            try:
+                async for event in events:
+                    if isinstance(event, StartConversationResponseEventStreamTranscriptEvent):
+                        text = event.value.transcript or ""
+                        logger.info(f"[lex] caller_said: {text!r}")
+                        # Noise Lex took for speech arrives with nothing transcribed. There
+                        # is no turn to answer, and Bedrock refuses a blank message.
+                        if text.strip():
+                            await self._transcripts.put(text)
+                    elif isinstance(event, StartConversationResponseEventStreamTextResponseEvent):
+                        # The Lex hook's placeholder prompt (see lex_hook). Nothing to
+                        # play: tell Lex it has played, so it listens for the next turn.
+                        await stream.input_stream.send(
+                            StartConversationRequestEventStreamPlaybackCompletionEvent(PlaybackCompletionEvent())
+                        )
+                    elif type(event).__name__.endswith("Exception"):
+                        raise RuntimeError(f"Lex stream failed: {event.value}")
+            except Exception:
+                if not self._replaced(stream):
+                    raise
+            if not self._replaced(stream):
+                raise RuntimeError("Lex closed the conversation stream")
+
+    def _replaced(self, stream: Any) -> bool:
+        """Whether ``stream`` ended because the pod is replacing it."""
+        return stream is not self._lex or not self._lex_ready.is_set()
 
     async def _turn_worker(self) -> None:
         """Greet while the agent initializes, then answer caller turns strictly one at a time."""

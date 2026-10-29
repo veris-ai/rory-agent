@@ -414,3 +414,116 @@ def test_words_before_a_tool_call_are_spoken_while_the_tool_runs(monkeypatch):
     asyncio.run(agent._Call(Actor())._take_turn("what do I owe"))
 
     assert spoken == ["Let me check.", "You owe 42 dollars."]
+
+
+def test_the_lex_stream_is_renewed_in_a_pause_and_turns_keep_flowing(monkeypatch):
+    from aws_sdk_lex_runtime_v2.models import (
+        StartConversationResponseEventStreamTranscriptEvent,
+        TranscriptEvent,
+    )
+
+    opened = []
+
+    class Stream:
+        def __init__(self):
+            self.ended = asyncio.Event()
+            self.closed = False
+            self.input_stream = self
+
+        async def send(self, event):
+            pass
+
+        async def await_output(self):
+            return None, self._events()
+
+        async def _events(self):
+            # The second stream carries the caller's turn; every stream ends when closed.
+            if len(opened) == 2 and self is opened[1]:
+                yield StartConversationResponseEventStreamTranscriptEvent(TranscriptEvent(transcript="still there?"))
+            await self.ended.wait()
+
+        async def close(self):
+            self.closed = True
+            self.ended.set()
+
+    async def open_lex(session_id):
+        opened.append(Stream())
+        return opened[-1]
+
+    turns = []
+
+    class Actor:
+        client = None
+
+        async def receive_bytes(self):
+            await asyncio.sleep(0.02)
+            if turns:
+                raise agent.WebSocketDisconnect(1000)
+            return bytes(agent.ACTOR_RATE_HZ * 2 // 50)
+
+        async def send_bytes(self, data):
+            pass
+
+    async def take_turn(self, text):
+        turns.append(text)
+
+    monkeypatch.setattr(agent, "LEX_STREAM_MAX_S", 0.1)
+    monkeypatch.setattr(agent, "_open_lex", open_lex)
+    monkeypatch.setattr(agent, "_init_agent", lambda session_id: None)
+    monkeypatch.setattr(agent, "_synthesize", lambda text: asyncio.sleep(0, ([], b"")))
+    monkeypatch.setattr(agent, "SileroVad", lambda rate: SimpleNamespace(push=lambda frame: False))
+    monkeypatch.setattr(agent._Call, "_take_turn", take_turn)
+
+    asyncio.run(asyncio.wait_for(agent._Call(Actor()).run(), 10))
+
+    assert turns == ["still there?"]
+    assert len(opened) >= 2
+    assert opened[0].closed
+
+
+def test_lex_hook_keeps_the_dialog_open_and_the_attributes():
+    from rory_agentcore import lex_hook
+
+    attrs = {"x-amz-lex:audio:end-timeout-ms:*:*": "400"}
+    event = {"sessionState": {"sessionAttributes": attrs, "intent": {"name": "FallbackIntent"}}}
+
+    assert lex_hook.handler(event, None) == {
+        "sessionState": {"dialogAction": {"type": "ElicitIntent"}, "sessionAttributes": attrs},
+        "messages": [{"contentType": "PlainText", "content": lex_hook.PLACEHOLDER}],
+    }
+
+
+def test_each_lex_response_is_acknowledged_so_lex_takes_the_next_turn():
+    from aws_sdk_lex_runtime_v2.models import (
+        StartConversationRequestEventStreamPlaybackCompletionEvent,
+        StartConversationResponseEventStreamTextResponseEvent,
+        StartConversationResponseEventStreamTranscriptEvent,
+        TextResponseEvent,
+        TranscriptEvent,
+    )
+
+    sent = []
+
+    class Stream:
+        input_stream = SimpleNamespace(send=None)
+
+        async def await_output(self):
+            async def events():
+                yield StartConversationResponseEventStreamTranscriptEvent(TranscriptEvent(transcript="hi"))
+                yield StartConversationResponseEventStreamTextResponseEvent(TextResponseEvent(messages=[]))
+            return None, events()
+
+    async def send(event):
+        sent.append(event)
+
+    stream = Stream()
+    stream.input_stream.send = send
+    call = agent._Call(SimpleNamespace(client=None))
+    call._lex = stream
+    call._lex_ready.set()
+
+    with pytest.raises(RuntimeError, match="closed the conversation stream"):
+        asyncio.run(call._read_lex())
+
+    assert call._transcripts.get_nowait() == "hi"
+    assert [type(e) for e in sent] == [StartConversationRequestEventStreamPlaybackCompletionEvent]
