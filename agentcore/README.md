@@ -41,8 +41,8 @@ caller ──voice_ws──▶ pod ──StartConversation (one stream per call)
    ConverseStream with the shared prompt, the frozen-clock date and the shared
    tool declaration, up to five rounds. Each tool call goes out through the
    gateway, one at a time, with the session id added after the model chose the
-   call. One voice note joins the prompt: say what you are doing before a tool
-   call, so the caller hears something while it runs.
+   call. Words the model says before a tool call are spoken while the tool
+   runs.
 4. **Tools Lambda.** Rebuilds the `CallSession` from the session record, points
    the vendor clients at this call's twins, runs one tool through
    `rory_tools.dispatch`, and writes verification back.
@@ -62,13 +62,14 @@ Rory speaks first: the runtime seeds its history with the greeting behind a
 From the end of the caller's speech to Rory's first audio, measured live from a
 laptop against the deployed stack, turns without tools: 1.7 to 2.6 s. Of that,
 Lex takes 0.6 to 1.2 s to close the turn, the agent's first words take about
-0.75 s, and Polly about 0.3 s. Tool turns open with the spoken preamble, so the
-caller hears Rory in the same time while the tool runs.
+0.75 s, and Polly about 0.3 s. A tool turn the model opens with words ("let me
+check that") is heard as fast; one that goes straight to the tool is silent until
+the tool returns, 2 to 5 s more against the bench's twins.
 
 ## What stays shared
 
 The model sees the shared prompt, greeting and 16 tool declarations
-(`tools.CONVERSE_TOOLS`), plus the voice note, and every tool runs through the
+(`tools.CONVERSE_TOOLS`), nothing more, and every tool runs through the
 shared dispatcher in the tools Lambda. The gateway target declares the same
 tools plus `session_id`, without the JSON Schema keywords the gateway does not
 accept (`minimum` on `make_payment.amount_cents`); the model never sees that
@@ -110,6 +111,7 @@ docker build --platform linux/amd64 -f agentcore/Dockerfile -t rory-agentcore .
 | `STRIPE_API_BASE` / `FINERACT_API_BASE` | — | Required. Injected by the bench; passed on to the tools Lambda. |
 | `STRIPE_API_KEY` | — | Required. Sandbox fixture; the billing twin's credential. |
 | `RORY_REFERENCE_TIME` | wall clock | The bench's frozen clock, passed to the runtime and the tools. |
+| `RORY_TOOL_PREAMBLE` | off | Demo only, never on the bench. `1` adds one line to the prompt asking the model to say what it is doing before a tool call, so lookups are not silent. The benchmark gives every candidate the same prompt. |
 | `LEX_END_TIMEOUT_MS` | `400` | Silence that ends a caller's turn. Lower answers sooner and splits more pauses. |
 | `LEX_LOCALE_ID` | `en_US` | Lex locale. |
 | `POLLY_VOICE_ID` / `POLLY_ENGINE` | `Joanna` / `neural` | Polly voice. |

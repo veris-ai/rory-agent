@@ -70,6 +70,7 @@ from .contract import (
     ATTR_REFERENCE_TIME,
     ATTR_STRIPE_API_BASE,
     ATTR_STRIPE_API_KEY,
+    ATTR_TOOL_PREAMBLE,
     CALL_CONNECTED,
     INTERRUPTED_MARKER,
 )
@@ -77,6 +78,9 @@ from .contract import (
 LEX_LOCALE_ID = os.environ.get("LEX_LOCALE_ID", "en_US")
 POLLY_VOICE_ID = os.environ.get("POLLY_VOICE_ID", "Joanna")
 POLLY_ENGINE = os.environ.get("POLLY_ENGINE", "neural")
+# Demo only: ask the model to say what it is doing before a tool call (see
+# runtime.TOOL_PREAMBLE). Off on the bench, where every candidate gets the same prompt.
+TOOL_PREAMBLE = os.environ.get("RORY_TOOL_PREAMBLE") == "1"
 
 ACTOR_RATE_HZ = 24000
 LEX_RATE_HZ = 8000
@@ -148,7 +152,7 @@ def resolve_vendor() -> None:
         _twins[ATTR_REFERENCE_TIME] = os.environ["RORY_REFERENCE_TIME"]
     logger.info(
         f"[startup] lex={os.environ['LEX_BOT_ID']}/{os.environ['LEX_BOT_ALIAS_ID']} "
-        f"polly={POLLY_VOICE_ID}/{POLLY_ENGINE}"
+        f"polly={POLLY_VOICE_ID}/{POLLY_ENGINE} tool_preamble={TOOL_PREAMBLE}"
     )
 
 
@@ -181,7 +185,7 @@ def _init_agent(session_id: str) -> None:
     """The init Lambda: the call's session record, and a warm agent session."""
     resp = _lambda.invoke(
         FunctionName=os.environ["INIT_LAMBDA"],
-        Payload=json.dumps({"session_id": session_id, **_twins}).encode(),
+        Payload=json.dumps({"session_id": session_id, ATTR_TOOL_PREAMBLE: TOOL_PREAMBLE, **_twins}).encode(),
     )
     body = resp["Payload"].read()
     if "FunctionError" in resp:

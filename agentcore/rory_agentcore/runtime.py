@@ -16,8 +16,8 @@ Two kinds of invocation:
   is generated, so the pod can speak the first sentence before the last is written.
 
 The model sees the shared prompt, the shared greeting and the shared tool
-declaration, plus one voice note: say what you are doing before a tool call, so
-the caller hears something while the tool runs. The session id is added to each
+declaration, as every other candidate's model does. A demo can add one line, off
+on the bench (see ``TOOL_PREAMBLE``). The session id is added to each
 tool call after the model has chosen it, so the model never supplies identity.
 """
 
@@ -40,6 +40,7 @@ from . import gateway
 from .contract import (
     ATTR_INTERRUPTED_REPLY,
     ATTR_REFERENCE_TIME,
+    ATTR_TOOL_PREAMBLE,
     CALL_CONNECTED,
     SESSION_ARG,
 )
@@ -48,8 +49,11 @@ from .tools import CONVERSE_TOOLS
 AGENT_PROMPT = load_agent_prompt()
 MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-5-5")
 
-# The caller hears dead air while a tool runs. A sentence spoken first covers it.
-VOICE_NOTE = (
+# Demo only. Tools run 2 to 5 s against the bench's twins, and the model usually calls
+# one without a word first, so the caller hears silence. This line asks it to say what
+# it is doing. The benchmark gives every candidate the same prompt, so it stays off
+# there; a demo pod turns it on with RORY_TOOL_PREAMBLE=1.
+TOOL_PREAMBLE = (
     "This is a live phone call: the caller hears silence while a tool runs. Before "
     "every tool call, including one that follows another tool's result, first say one "
     'short sentence telling the caller what you are doing, such as "Let me pull up '
@@ -84,7 +88,7 @@ def invocations(
 ):
     session_id = x_amzn_bedrock_agentcore_runtime_session_id
     if body.get("init"):
-        _sessions[session_id] = _new_session(body.get(ATTR_REFERENCE_TIME))
+        _sessions[session_id] = _new_session(body.get(ATTR_REFERENCE_TIME), body[ATTR_TOOL_PREAMBLE])
         _prime_cache(_sessions[session_id])
         return {"ready": True}
     session = _sessions[session_id]
@@ -94,14 +98,17 @@ def invocations(
     return StreamingResponse(events, media_type="text/event-stream")
 
 
-def _new_session(reference_time: str | None) -> dict[str, Any]:
-    """System prompt, date context, voice note, and the greeting the pod speaks."""
+def _new_session(reference_time: str | None, tool_preamble: bool) -> dict[str, Any]:
+    """System prompt, date context (and the demo line, if asked), and the greeting the pod speaks."""
     # The date context reads the frozen clock the bench restored with the twins'
     # snapshot. Unset in production, where it is the wall clock.
     if reference_time:
         os.environ["RORY_REFERENCE_TIME"] = reference_time
+    system = [{"text": AGENT_PROMPT}, {"text": today_context()}]
+    if tool_preamble:
+        system.append({"text": TOOL_PREAMBLE})
     return {
-        "system": [{"text": AGENT_PROMPT}, {"text": today_context()}, {"text": VOICE_NOTE}],
+        "system": system,
         "messages": [
             {"role": "user", "content": [{"text": CALL_CONNECTED}]},
             {"role": "assistant", "content": [{"text": GREETING}]},

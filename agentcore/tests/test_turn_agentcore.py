@@ -11,6 +11,7 @@ from rory_agentcore import agent, init_lambda, runtime, tools_lambda
 from rory_agentcore.contract import (
     ATTR_INTERRUPTED_REPLY,
     ATTR_REFERENCE_TIME,
+    ATTR_TOOL_PREAMBLE,
     CALL_CONNECTED,
     INTERRUPTED_MARKER,
     SESSION_ARG,
@@ -113,7 +114,7 @@ def test_init_sends_the_twins_and_fails_loudly(monkeypatch):
     monkeypatch.setattr(agent, "_twins", {"stripe_api_base": "https://twin/stripe"}, raising=False)
     monkeypatch.setattr(agent, "_lambda", FakeLambda(error=False), raising=False)
     agent._init_agent("s1")
-    assert calls == [{"session_id": "s1", "stripe_api_base": "https://twin/stripe"}]
+    assert calls == [{"session_id": "s1", ATTR_TOOL_PREAMBLE: False, "stripe_api_base": "https://twin/stripe"}]
 
     monkeypatch.setattr(agent, "_lambda", FakeLambda(error=True), raising=False)
     with pytest.raises(RuntimeError, match="boom"):
@@ -170,13 +171,18 @@ class FakeBedrock:
 
 
 def test_new_session_seeds_the_greeting_the_pod_speaks():
-    session = runtime._new_session(None)
+    session = runtime._new_session(None, False)
     assert session["system"][0] == {"text": runtime.AGENT_PROMPT}
-    assert session["system"][-1] == {"text": runtime.VOICE_NOTE}
+    assert len(session["system"]) == 2  # the shared prompt and the date, nothing else
     assert session["messages"] == [
         {"role": "user", "content": [{"text": CALL_CONNECTED}]},
         {"role": "assistant", "content": [{"text": GREETING}]},
     ]
+
+
+def test_the_demo_line_joins_the_prompt_only_when_asked():
+    assert runtime._new_session(None, True)["system"][-1] == {"text": runtime.TOOL_PREAMBLE}
+    assert {"text": runtime.TOOL_PREAMBLE} not in runtime._new_session(None, False)["system"]
 
 
 def test_a_turn_streams_its_words_and_calls_tools_with_the_session(monkeypatch):
@@ -188,7 +194,7 @@ def test_a_turn_streams_its_words_and_calls_tools_with_the_session(monkeypatch):
     calls = []
     monkeypatch.setattr(runtime, "_bedrock", bedrock)
     monkeypatch.setattr(runtime.gateway, "call_tool", lambda name, args: calls.append((name, args)) or {"balance": 42})
-    session = runtime._new_session(None)
+    session = runtime._new_session(None, False)
 
     events = list(runtime.take_turn(session, "sess-1", "what do I owe"))
 
@@ -213,7 +219,7 @@ def test_a_turn_streams_its_words_and_calls_tools_with_the_session(monkeypatch):
 def test_requests_cache_the_prefix_but_the_history_stays_clean(monkeypatch):
     bedrock = FakeBedrock([("end_turn", [{"text": "Sure."}])])
     monkeypatch.setattr(runtime, "_bedrock", bedrock)
-    session = runtime._new_session(None)
+    session = runtime._new_session(None, False)
 
     list(runtime.take_turn(session, "sess-1", "hello"))
 
@@ -230,7 +236,7 @@ def test_tool_loop_that_never_settles_fails_loudly(monkeypatch):
     monkeypatch.setattr(runtime.gateway, "call_tool", lambda name, args: {})
 
     with pytest.raises(RuntimeError, match="did not settle"):
-        list(runtime.take_turn(runtime._new_session(None), "sess-1", "hi"))
+        list(runtime.take_turn(runtime._new_session(None, False), "sess-1", "hi"))
 
 
 def test_a_failed_turn_leaves_the_history_as_it_was(monkeypatch):
@@ -239,7 +245,7 @@ def test_a_failed_turn_leaves_the_history_as_it_was(monkeypatch):
             raise RuntimeError("ValidationException")
 
     monkeypatch.setattr(runtime, "_bedrock", Refusing())
-    session = runtime._new_session(None)
+    session = runtime._new_session(None, False)
     before = [dict(m) for m in session["messages"]]
 
     with pytest.raises(RuntimeError):
@@ -259,7 +265,8 @@ def test_init_primes_the_cache_and_a_barge_in_rewrites_the_last_reply(monkeypatc
     runtime._sessions.clear()
     heard = "Thanks for calling" + INTERRUPTED_MARKER
 
-    assert runtime.invocations({"init": True, ATTR_REFERENCE_TIME: "2026-09-10T00:59:09Z"}, "sess-2") == {"ready": True}
+    init = {"init": True, ATTR_REFERENCE_TIME: "2026-09-10T00:59:09Z", ATTR_TOOL_PREAMBLE: False}
+    assert runtime.invocations(init, "sess-2") == {"ready": True}
     assert bedrock.calls[0]["inferenceConfig"] == {"maxTokens": 1}
     events = asyncio.run(_drain(runtime.invocations({"text": "I need help", ATTR_INTERRUPTED_REPLY: heard}, "sess-2")))
 
@@ -317,14 +324,15 @@ def test_init_writes_the_record_and_warms_the_agent_session(monkeypatch):
     monkeypatch.setattr(init_lambda, "_runtime", FakeRuntime())
     monkeypatch.setenv("AGENTCORE_RUNTIME_ARN", "arn:runtime")
 
-    assert init_lambda.handler({"session_id": "sess-3", **TWINS}, None) == {"ready": True}
+    assert init_lambda.handler({"session_id": "sess-3", ATTR_TOOL_PREAMBLE: True, **TWINS}, None) == {"ready": True}
 
     assert table.puts[0]["ConditionExpression"] == "attribute_not_exists(session_id)"
     assert table.item["stripe_api_base"] == "https://twin/stripe"
     assert table.item["failed_attempts"] == 0
     assert table.item["reference_time"] == "2026-09-10T00:59:09Z"
     assert sent[0]["runtimeSessionId"] == "sess-3"
-    assert json.loads(sent[0]["payload"]) == {"init": True, ATTR_REFERENCE_TIME: "2026-09-10T00:59:09Z"}
+    assert json.loads(sent[0]["payload"]) == {
+        "init": True, ATTR_REFERENCE_TIME: "2026-09-10T00:59:09Z", ATTR_TOOL_PREAMBLE: True}
 
 
 # ------------------------------------------------------------ the tools Lambda

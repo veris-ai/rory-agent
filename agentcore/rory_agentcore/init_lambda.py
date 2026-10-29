@@ -21,6 +21,7 @@ from .contract import (
     ATTR_REFERENCE_TIME,
     ATTR_STRIPE_API_BASE,
     ATTR_STRIPE_API_KEY,
+    ATTR_TOOL_PREAMBLE,
 )
 
 # Session records outlive the call by a day, then DynamoDB drops them.
@@ -40,7 +41,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         "failed_attempts": 0,
         "expires_at": int(time.time()) + RECORD_TTL_S,
     }
-    payload: dict[str, Any] = {"init": True}
+    payload: dict[str, Any] = {"init": True, ATTR_TOOL_PREAMBLE: event[ATTR_TOOL_PREAMBLE]}
     if ATTR_REFERENCE_TIME in event:
         item["reference_time"] = event[ATTR_REFERENCE_TIME]
         payload[ATTR_REFERENCE_TIME] = event[ATTR_REFERENCE_TIME]
