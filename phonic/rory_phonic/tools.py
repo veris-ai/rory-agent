@@ -8,8 +8,21 @@ transports. This module is only the Phonic-shaped wrapper:
 
 Phonic declares an inline tool as a ``custom_websocket`` entry whose
 ``tool_schema`` is the OpenAI function shape, so the shared JSON-Schema
-``parameters()`` object goes in unchanged. The tool is ``sync``: the pod answers
-each ``tool_call`` with a ``tool_call_output`` before the model continues.
+``parameters()`` object goes in unchanged. The pod answers each ``tool_call``
+with a ``tool_call_output``.
+
+By default, caller speech during a sync call cancels it. A call already running
+may have acted (a payment recorded, a plan opened), and a model that never hears
+the result asks again, so no tool here can be cancelled that way:
+
+- The tools that change the account (``WRITE_TOOLS``) are ``async`` with
+  ``wait_for_response``. The conversation goes on while the tool runs, caller
+  speech can't cancel it, and the agent speaks the result when it arrives.
+  Phonic rejects ``wait_for_response`` with tool chaining on, so after one of
+  these the agent speaks before it calls another tool.
+- The lookups stay ``sync`` and ``uninterruptible``. The agent waits for the
+  result, still hears the caller, and answers once the tool returns. Lookups
+  still chain, e.g. verifying the caller and then reading the account.
 """
 
 from __future__ import annotations
@@ -24,11 +37,25 @@ from rory_tools.schemas import ToolSchema
 # timed-out tool call.
 TOOL_CALL_OUTPUT_TIMEOUT_MS = 30000
 
+# The shared tools that change the account: a payment, a plan opened or changed,
+# a due-date extension, paperless billing.
+WRITE_TOOLS = {
+    "make_payment",
+    "create_payment_arrangement",
+    "modify_payment_arrangement",
+    "request_due_date_extension",
+    "set_paperless_billing",
+}
+
 
 def _as_phonic_tool(schema: ToolSchema) -> Dict[str, Any]:
+    if schema.name in WRITE_TOOLS:
+        timing = {"execution_mode": "async", "wait_for_response": True, "allow_tool_chaining": False}
+    else:
+        timing = {"execution_mode": "sync", "uninterruptible": True}
     return {
         "type": "custom_websocket",
-        "execution_mode": "sync",
+        **timing,
         "tool_call_output_timeout_ms": TOOL_CALL_OUTPUT_TIMEOUT_MS,
         "tool_schema": {
             "type": "function",
