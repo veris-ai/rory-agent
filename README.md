@@ -50,6 +50,7 @@ wrong.
 | [`dialt`](dialt/) | Dialt's managed voice API over a WebSocket; `DIALT_BRAIN` selects Dialt Fast or Dialt Smart, with Rory's tools dispatched locally |
 | [`phonic`](phonic/) | Phonic speech-to-speech over its conversation websocket — one `config` per call carrying the shared prompt, greeting and tools as inline `custom_websocket` tools, Rory's tools answered by the pod with `tool_call_output` |
 | [`agentcore`](agentcore/) | Amazon Connect's voice stack — Lex for speech-to-text, Bedrock AgentCore Runtime for the model and tool rounds, Polly for speech — a hand-rolled cascade, Rory's tools dispatched locally |
+| [`rime-prism`](rime-prism/) | Rime Prism speech-to-speech through the Rime Python SDK — one session per call carrying the shared prompt and tools, Prism's own turn-taking, the SDK's conversation runner bridging the actor's audio, Rory's tools dispatched locally |
 
 Each ships as its own image, built from one shared lockfile with
 `uv sync --package`, so a candidate carries only its own voice SDK. Most have
@@ -70,7 +71,7 @@ gemini-live/   Gemini Live transport
 gemini-live-xt-thinking/   Gemini 3.8 Live Extended Thinking (copy of gemini-live)
 openai-realtime/, deepgram/, elevenlabs/, elevenlabs-realtime/, livekit/, mistral/, fluxions/, huggingface/,
 grok-voice/, vapi/, cartesia/, gradium/, polyai/, gpt-live/,
-grok-cascade/, smallest/, dialt/, phonic/, agentcore/  nineteen more transports, same contract
+grok-cascade/, smallest/, dialt/, phonic/, agentcore/, rime-prism/  twenty more transports, same contract
 ```
 
 A transport is expected to use three things — `SCHEMAS`, `CallSession`, and
