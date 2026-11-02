@@ -134,9 +134,8 @@ def test_a_reply_without_tool_calls_is_not_continued(monkeypatch):
 
 
 def test_a_dropped_round_is_reported_once_prism_is_idle(monkeypatch):
-    """The smoke-run case: the caller said "okay" during verify_caller, Prism said
-    "please hold", and the result came in after. Prism said nothing more, and the
-    caller hung up. The result is now reported once Prism is idle."""
+    """The caller speaks while a call runs, Prism answers them before the result is
+    in, and the round closes. Without a report, Prism never mentions the result."""
     session = FakeSession(refuse={"resp_1": RimeInputError("the caller spoke first")})
     events = [_call("resp_1", "call_a", "verify_caller"), _ended("resp_1"), _ended("resp_2"), InputReady()]
     ran = _run(events, session, monkeypatch)
@@ -153,9 +152,9 @@ def test_a_cancelled_reply_is_not_continued_and_its_result_is_reported(monkeypat
 
 
 def test_a_round_superseded_by_a_newer_round_is_not_reported(monkeypatch):
-    """The first smoke run's case: the reply to the caller's "okay" made its own
-    call. The newer round continues with every result in the history, so reporting
-    the old one would repeat the answer. No call runs twice."""
+    """Prism answers the caller with a reply that makes its own call. The newer
+    round continues with every result in the history, so reporting the old one would
+    repeat the answer. No call runs twice."""
     session = FakeSession(refuse={"resp_1": RimeInputError("the caller spoke first")})
     events = [
         _call("resp_1", "call_a"),
@@ -192,8 +191,8 @@ def test_no_report_when_prism_answered_the_caller_after_the_result(monkeypatch):
 
 
 def test_an_answer_that_started_before_the_result_still_gets_the_report(monkeypatch):
-    """The premature-claim case: the caller said "okay" during the 9 s
-    create_payment_arrangement, and Prism answered before the result was in."""
+    """Prism answered the caller before a write's result was in, so the answer could
+    not use it, and the report still goes out."""
     session = FakeSession(refuse={"resp_1": RimeInputError("the caller spoke first")})
     events = [
         _call("resp_1", "call_pay", "create_payment_arrangement"),
@@ -282,9 +281,9 @@ def _drive(session, steps, monkeypatch, lookup_s: float = 0.0):
 
 
 def test_a_held_report_is_withdrawn_when_prism_answers_the_caller(monkeypatch):
-    """Smoke 3's case: the report waited for Prism to be idle, the caller said "okay",
-    and Prism's answer made a new call. Taken after that, the report closed the new
-    round, and the caller heard the result again."""
+    """The report waits for Prism to be idle, the caller speaks, and Prism's answer
+    makes a new call. Taken after that, the report would close the new round, and
+    the caller would hear the result again."""
     session = FakeSession(refuse={"resp_1": RimeInputError("the caller spoke first")})
     session.idle.clear()
     _drive(session, [

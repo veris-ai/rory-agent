@@ -77,8 +77,7 @@ SUPERSEDED_CODES = {"tool_continuation_unavailable", "response_superseded"}
 
 # Rime's slow-tool pattern: a few seconds of silence after the tool's phrase
 # sounds like a dropped line, so a lookup still running after 4 s gets a short
-# line, and another 10 s after that. Only create_payment_arrangement (~9 s) runs
-# that long.
+# line, and another 10 s after that.
 STILL_WORKING = "Tell the caller in one short sentence that you are still working on it."
 STILL_WORKING_WAITS_S = (4.0, 10.0)
 
