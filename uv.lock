@@ -30,6 +30,7 @@ members = [
     "rory-phonic",
     "rory-pipecat",
     "rory-polyai",
+    "rory-polyai-dialog-rsn-1",
     "rory-smallest",
     "rory-vapi",
 ]
@@ -2731,6 +2732,7 @@ dev = [
     { name = "rory-phonic" },
     { name = "rory-pipecat" },
     { name = "rory-polyai" },
+    { name = "rory-polyai-dialog-rsn-1" },
     { name = "rory-smallest" },
     { name = "rory-vapi" },
 ]
@@ -2772,6 +2774,7 @@ dev = [
     { name = "rory-phonic", editable = "phonic" },
     { name = "rory-pipecat", editable = "pipecat" },
     { name = "rory-polyai", editable = "polyai" },
+    { name = "rory-polyai-dialog-rsn-1", editable = "polyai-dialog-rsn-1" },
     { name = "rory-smallest", editable = "smallest" },
     { name = "rory-vapi", editable = "vapi" },
 ]
@@ -3306,6 +3309,33 @@ requires-dist = [
     { name = "rory-core", editable = "." },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
     { name = "websockets", specifier = ">=13" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=8.0" }]
+
+[[package]]
+name = "rory-polyai-dialog-rsn-1"
+version = "0.1.0"
+source = { editable = "polyai-dialog-rsn-1" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "rory-core" },
+    { name = "uvicorn", extra = ["standard"] },
+    { name = "websockets" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "rory-core", editable = "." },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+    { name = "websockets", specifier = ">=14" },
 ]
 
 [package.metadata.requires-dev]
