@@ -91,3 +91,7 @@ def test_candidate_fails_closed_without_its_credential():
     finally:
         if saved is not None:
             os.environ["RIME_API_KEY"] = saved
+
+
+def test_every_write_tool_is_a_real_shared_tool():
+    assert tools.WRITE_TOOLS <= {schema.name for schema in SCHEMAS}

@@ -33,7 +33,6 @@ from rimelabs_sdk import Rime, RimeInputError
 from rimelabs_sdk.realtime import (
     AudioChunk,
     FaultEvent,
-    InputReady,
     ItemTruncated,
     OutputRef,
     PCMFormat,
@@ -56,7 +55,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from rory_tools import CallSession, dispatch
 from rory_tools.prompt import GREETING, load_agent_prompt, today_context
 
-from .tools import TOOLS
+from .tools import TOOLS, WRITE_TOOLS
 
 PRISM_VOICE = os.environ.get("PRISM_VOICE", "aurora")
 
@@ -202,19 +201,19 @@ async def _control(session: RealtimeSession, rounds: ToolRounds) -> None:
 
 
 class ToolRounds:
-    """Rory's tool rounds on one Prism session, run the way Rime's tool guides run them.
+    """Rory's tool rounds on one Prism session, run the way Rime's tools guide runs them.
 
-    The vendor clients are blocking and share account state, so calls run in order
-    on a worker thread. The runner keeps reading Prism's events meanwhile. A reply's
-    ``tool.call`` events arrive before its ``response.ended``, so by the time this
-    loop reads the end of a reply, every call it made has its result, and the reply
-    is continued.
+    Each call starts on its own task as soon as Prism makes it, with the shared
+    dispatcher on a worker thread, and the runner keeps reading Prism's events
+    meanwhile. When the reply that made the calls ends, its round waits for all of
+    them and then continues the reply. A failure in any of these tasks ends the
+    call. Lookups run side by side; writes run one at a time (``WRITE_TOOLS``).
 
-    A round can close before it uses its result: the caller spoke first (even an
-    "okay"), the reply that made the call was cancelled, or a still-working line
-    closed it. Prism keeps the result but mentions it only if asked, so the caller
-    would sit in silence. Once Prism is idle with no newer round open, a nudge
-    reports the result, unless Prism has already answered the caller since the
+    A round can close before it uses its results: the caller spoke first (even an
+    "okay"), the reply that made the calls was cancelled, or a still-working line
+    closed it. Prism keeps the results but mentions them only if asked, so the
+    caller would sit in silence. When no other round is open, a nudge reports the
+    round's last result, unless Prism has already answered the caller since that
     result went in. A nudge closes any open round, so one taken after Prism has
     started answering the caller closes the round that answer opened, and the
     caller hears answers twice. Prism takes a nudge only once it is idle, so every
@@ -226,12 +225,10 @@ class ToolRounds:
     def __init__(self, session: RealtimeSession, call_session: CallSession) -> None:
         self._session = session
         self._call_session = call_session
-        self._events: asyncio.Queue[ToolCall | ResponseEnded | InputReady] = asyncio.Queue()
+        self._events: asyncio.Queue[ToolCall | ResponseEnded] = asyncio.Queue()
         self._answers = 0  # replies so far that answered with the whole history
-        # Each round with every result in: its parent reply -> its last call, and
-        # the answer count when that result went in.
-        self._open: dict[str, tuple[ToolCallRef, int]] = {}
-        self._unreported: tuple[ToolCallRef, int] | None = None
+        self._rounds: dict[str, list[asyncio.Task]] = {}  # each open round's calls
+        self._writes = asyncio.Lock()
         self._nudges: set[asyncio.Task] = set()  # nudges waiting for Prism to be idle
 
     def notice(self, payload: object) -> None:
@@ -240,44 +237,52 @@ class ToolRounds:
             self._answers += 1
             for nudge in self._nudges:
                 nudge.cancel()
-        elif isinstance(payload, (ToolCall, ResponseEnded, InputReady)):
+        elif isinstance(payload, (ToolCall, ResponseEnded)):
             self._events.put_nowait(payload)
 
     async def run(self) -> None:
-        while True:
-            payload = await self._events.get()
-            if isinstance(payload, ToolCall):
-                await self._run_call(payload)
-            elif isinstance(payload, ResponseEnded):
-                await self._end_round(payload)
-            elif self._unreported is not None and not self._open and self._events.empty():
-                # Prism is idle, and nothing newer is waiting.
-                await self._report()
+        async with asyncio.TaskGroup() as tasks:
+            while True:
+                payload = await self._events.get()
+                if isinstance(payload, ToolCall):
+                    run = tasks.create_task(self._run_call(payload))
+                    self._rounds.setdefault(payload.call.response_id, []).append(run)
+                elif payload.response.response_id in self._rounds:
+                    tasks.create_task(self._finish_round(payload))
 
-    async def _run_call(self, call: ToolCall) -> None:
+    async def _run_call(self, call: ToolCall) -> tuple[ToolCallRef, int]:
+        """Run one call and submit its result. Returns the call and the answer count then."""
         lines = asyncio.create_task(self._say_still_working())
         try:
-            result = await asyncio.to_thread(dispatch, self._call_session, call.name, dict(call.arguments))
+            if call.name in WRITE_TOOLS:
+                async with self._writes:
+                    result = await self._dispatch(call)
+            else:
+                result = await self._dispatch(call)
         finally:
             lines.cancel()
         logger.info(f"[prism] tool {call.name} ({call.call.call_id}) -> {json.dumps(result)}")
         await self._session.submit_tool_result(call.call, json.dumps(result))
-        self._open[call.call.response_id] = (call.call, self._answers)
+        return call.call, self._answers
 
-    async def _end_round(self, ended: ResponseEnded) -> None:
+    async def _dispatch(self, call: ToolCall) -> dict:
+        return await asyncio.to_thread(dispatch, self._call_session, call.name, dict(call.arguments))
+
+    async def _finish_round(self, ended: ResponseEnded) -> None:
+        """Continue the reply once all its calls are in, or report a result it dropped."""
         response_id = ended.response.response_id
-        last = self._open.pop(response_id, None)
-        if last is None:
-            return
-        if ended.status != "completed":
-            logger.info(f"[prism] round of {response_id} dropped: the reply was {ended.status}")
-        elif await _continue(self._session, ended):
-            return
-        self._unreported = last
+        try:
+            results = await asyncio.gather(*self._rounds[response_id])
+            if ended.status != "completed":
+                logger.info(f"[prism] round of {response_id} dropped: the reply was {ended.status}")
+            elif await _continue(self._session, ended):
+                return
+            if len(self._rounds) == 1:
+                await self._report(*results[-1])
+        finally:
+            del self._rounds[response_id]
 
-    async def _report(self) -> None:
-        call, answers_then = self._unreported
-        self._unreported = None
+    async def _report(self, call: ToolCallRef, answers_then: int) -> None:
         if self._answers > answers_then:
             logger.info(f"[prism] result of {call.call_id} not reported: Prism has answered since")
             return

@@ -28,9 +28,13 @@ playback. Nothing dials in.
   to say the shared greeting. Prism generates the audio, so it can paraphrase.
 - **Tools.** Each tool is a `ToolDefinition` built from the shared schema, with
   no `prism_filler` set, so Prism says its own short phrase ("One moment.")
-  while a tool runs. Calls run one at a time through the shared dispatcher,
-  each result is submitted, and the reply that made them is continued. No call
-  is ever run again.
+  while a tool runs. As in Rime's tools guide, each call starts on its own task
+  as soon as Prism makes it, runs through the shared dispatcher, and submits
+  its result; the reply that made the calls is continued once all of them are
+  in. Lookups run side by side. Writes (`WRITE_TOOLS`: payments, plans,
+  extensions, paperless) run one at a time, because Prism can ask for the same
+  write again while the first is still running, and the shared tools refuse
+  the repeat only once the first has finished. No call is ever run again.
 - **Slow tools.** A lookup still running after 4 s gets a nudge for one short
   "still working" line, and another 10 s later, as in Rime's slow-tool guide.
 - **Results of closed rounds.** A round can close before it uses its result:

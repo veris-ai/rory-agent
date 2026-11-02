@@ -31,6 +31,19 @@ def _as_prism_tool(schema: ToolSchema) -> ToolDefinition:
 # The shared tools, handed to ``client.realtime.connect(tools=...)``.
 TOOLS: list[ToolDefinition] = [_as_prism_tool(s) for s in SCHEMAS]
 
+# The shared tools that change the account: a payment, a plan opened or changed,
+# a due-date extension, paperless billing. Lookups run side by side as Rime's
+# tools guide runs them; these run one at a time, because Prism can ask for the
+# same write again while the first is still running, and the shared tools refuse
+# the repeat only once the first has finished.
+WRITE_TOOLS = {
+    "make_payment",
+    "create_payment_arrangement",
+    "modify_payment_arrangement",
+    "request_due_date_extension",
+    "set_paperless_billing",
+}
+
 
 def tool_surface() -> dict:
     """What this transport actually hands Prism, read back for the parity check.

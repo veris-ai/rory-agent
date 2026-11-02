@@ -1,22 +1,24 @@
 """Prism tool rounds against a fake session.
 
-The parity tests check the declared surface. These drive the tool loop: calls run
-one at a time through the dispatcher, each result is submitted, and the reply that
-made them is continued. A round that closes before it uses its result is reported
-with a nudge once Prism is idle, unless a newer round is open or Prism has answered
-the caller since the result went in. No call is ever run twice.
+The parity tests check the declared surface. These drive the tool loop: each call
+runs on its own task through the dispatcher as Prism makes it (writes one at a
+time), each result is submitted, and the reply that made the calls is continued
+once all of them are in. A round that closes before it uses its results is
+reported with a nudge, unless another round is open or Prism has answered the
+caller since. A nudge still waiting is withdrawn when Prism starts answering the
+caller. No call is ever run twice.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 
 import pytest
 from rimelabs_sdk import RimeInputError
 from rimelabs_sdk.realtime import (
-    InputReady,
     RealtimeFault,
     ResponseEnded,
     ResponseRef,
@@ -83,184 +85,33 @@ def _superseded(code: str = "tool_continuation_unavailable") -> RimeRealtimeErro
     return RimeRealtimeError(RealtimeFault(code=code, message="round closed", scope="tool_roundtrip"))
 
 
-def _run(events, session, monkeypatch, lookup_s: float = 0.0):
-    ran: list[str] = []
+class FakeDispatch:
+    """The shared dispatcher, recording which calls ran and how many at once."""
 
-    def fake_dispatch(_session, name, args):
-        ran.append(args["n"])
-        time.sleep(lookup_s)
+    def __init__(self, lookup_s: float) -> None:
+        self.lookup_s = lookup_s
+        self.ran: list[str] = []
+        self.running: dict[str, int] = {"write": 0, "read": 0}
+        self.most: dict[str, int] = {"write": 0, "read": 0}
+        self._lock = threading.Lock()
+
+    def __call__(self, _session, name, args):
+        kind = "write" if name in agent.WRITE_TOOLS else "read"
+        with self._lock:
+            self.ran.append(args["n"])
+            self.running[kind] += 1
+            self.most[kind] = max(self.most[kind], self.running[kind])
+        time.sleep(self.lookup_s)
+        with self._lock:
+            self.running[kind] -= 1
         return {"tool": name, "ok": True}
 
-    monkeypatch.setattr(agent, "dispatch", fake_dispatch)
 
-    async def go():
-        rounds = agent.ToolRounds(session, object())
-        session.rounds = rounds
-        for event in events:
-            rounds.notice(event)
-        loop = asyncio.create_task(rounds.run())
-        while not rounds._events.empty() and not loop.done():
-            await asyncio.sleep(0.01)
-        await asyncio.sleep(0.05)
-        if loop.done():
-            return loop.result()
-        loop.cancel()
-        await asyncio.gather(loop, return_exceptions=True)
-
-    asyncio.run(go())
-    return ran
-
-
-def _kinds(session) -> list:
-    return [entry[:2] for entry in session.log]
-
-
-def test_calls_run_in_order_then_the_reply_continues(monkeypatch):
-    session = FakeSession()
-    events = [_call("resp_1", "call_a", "verify_caller"), _call("resp_1", "call_b"), _ended("resp_1"), InputReady()]
-    ran = _run(events, session, monkeypatch)
-    assert ran == ["call_a", "call_b"]
-    assert session.log == [
-        ("result", "call_a", {"tool": "verify_caller", "ok": True}),
-        ("result", "call_b", {"tool": "get_account", "ok": True}),
-        ("continue", "resp_1"),
-    ]
-
-
-def test_a_reply_without_tool_calls_is_not_continued(monkeypatch):
-    session = FakeSession()
-    _run([_ended("resp_1"), InputReady()], session, monkeypatch)
-    assert session.log == []
-
-
-def test_a_dropped_round_is_reported_once_prism_is_idle(monkeypatch):
-    """The caller speaks while a call runs, Prism answers them before the result is
-    in, and the round closes. Without a report, Prism never mentions the result."""
-    session = FakeSession(refuse={"resp_1": RimeInputError("the caller spoke first")})
-    events = [_call("resp_1", "call_a", "verify_caller"), _ended("resp_1"), _ended("resp_2"), InputReady()]
-    ran = _run(events, session, monkeypatch)
-    assert ran == ["call_a"]
-    assert _kinds(session) == [("result", "call_a"), ("continue", "resp_1"), ("report", "call_a")]
-
-
-def test_a_cancelled_reply_is_not_continued_and_its_result_is_reported(monkeypatch):
-    session = FakeSession()
-    events = [_call("resp_1", "call_a", "verify_caller"), _ended("resp_1", status="cancelled"), InputReady()]
-    ran = _run(events, session, monkeypatch)
-    assert ran == ["call_a"]
-    assert _kinds(session) == [("result", "call_a"), ("report", "call_a")]
-
-
-def test_a_round_superseded_by_a_newer_round_is_not_reported(monkeypatch):
-    """Prism answers the caller with a reply that makes its own call. The newer
-    round continues with every result in the history, so reporting the old one would
-    repeat the answer. No call runs twice."""
-    session = FakeSession(refuse={"resp_1": RimeInputError("the caller spoke first")})
-    events = [
-        _call("resp_1", "call_a"),
-        _ended("resp_1"),
-        InputReady(),
-        _call("resp_2", "call_b", "get_payment_arrangement"),
-        _ended("resp_2"),
-        InputReady(),
-    ]
-    ran = _run(events, session, monkeypatch)
-    assert ran == ["call_a", "call_b"]
-    assert _kinds(session) == [
-        ("result", "call_a"),
-        ("continue", "resp_1"),
-        ("result", "call_b"),
-        ("continue", "resp_2"),
-    ]
-
-
-def test_no_report_while_a_newer_round_is_still_open(monkeypatch):
-    session = FakeSession(refuse={"resp_1": RimeInputError("the caller spoke first")})
-    events = [_call("resp_1", "call_a"), _ended("resp_1"), InputReady(), _call("resp_2", "call_b"), InputReady()]
-    _run(events, session, monkeypatch)
-    assert ("report", "call_a") not in _kinds(session)
-
-
-def test_no_report_when_prism_answered_the_caller_after_the_result(monkeypatch):
-    """The caller asked again after the result went in, and Prism's answer had the
-    result in its history."""
-    session = FakeSession(refuse={"resp_1": RimeInputError("the caller spoke first")})
-    session.before_continue = [_started("resp_2", "speech")]
-    _run([_call("resp_1", "call_a"), _ended("resp_1"), _ended("resp_2"), InputReady()], session, monkeypatch)
-    assert _kinds(session) == [("result", "call_a"), ("continue", "resp_1")]
-
-
-def test_an_answer_that_started_before_the_result_still_gets_the_report(monkeypatch):
-    """Prism answered the caller before a write's result was in, so the answer could
-    not use it, and the report still goes out."""
-    session = FakeSession(refuse={"resp_1": RimeInputError("the caller spoke first")})
-    events = [
-        _call("resp_1", "call_pay", "create_payment_arrangement"),
-        _ended("resp_1"),
-        _started("resp_2", "speech"),
-        _ended("resp_2"),
-        InputReady(),
-    ]
-    _run(events, session, monkeypatch)
-    assert _kinds(session)[-1] == ("report", "call_pay")
-
-
-@pytest.mark.parametrize("code", sorted(agent.SUPERSEDED_CODES))
-def test_prism_refusing_the_continuation_drops_the_round(monkeypatch, code):
-    session = FakeSession(refuse={"resp_1": _superseded(code)})
-    ran = _run([_call("resp_1", "call_pay", "make_payment"), _ended("resp_1"), InputReady()], session, monkeypatch)
-    assert ran == ["call_pay"]
-    assert [entry[0] for entry in session.log] == ["result", "continue", "report"]
-
-
-def test_any_other_continuation_error_fails_the_call(monkeypatch):
-    fault = RealtimeFault(code="invalid_tool_continuation", message="no parent", scope="event")
-    session = FakeSession(refuse={"resp_1": RimeRealtimeError(fault)})
-    with pytest.raises(RimeRealtimeError, match="invalid_tool_continuation"):
-        _run([_call("resp_1", "call_a"), _ended("resp_1")], session, monkeypatch)
-
-
-def test_a_report_the_caller_talks_over_is_skipped(monkeypatch):
-    session = FakeSession(
-        refuse={"resp_1": RimeInputError("the caller spoke first")},
-        refuse_report=_superseded("nudge_superseded"),
-    )
-    events = [_call("resp_1", "call_a"), _ended("resp_1"), InputReady(), _call("resp_2", "call_b"), _ended("resp_2")]
-    ran = _run(events, session, monkeypatch)
-    assert ran == ["call_a", "call_b"]
-    assert _kinds(session)[-2:] == [("result", "call_b"), ("continue", "resp_2")]
-
-
-def test_a_slow_lookup_gets_a_still_working_line_and_then_the_report(monkeypatch):
-    """Rime's slow-tool pattern. The line closes the round, so the result is
-    reported with a nudge."""
-    monkeypatch.setattr(agent, "STILL_WORKING_WAITS_S", (0.05, 10.0))
-    session = FakeSession(refuse={"resp_1": RimeInputError("the line closed the round")})
-    events = [_call("resp_1", "call_pay", "create_payment_arrangement"), _ended("resp_1"), InputReady()]
-    _run(events, session, monkeypatch, lookup_s=0.2)
-    assert _kinds(session) == [
-        ("line", agent.STILL_WORKING),
-        ("result", "call_pay"),
-        ("continue", "resp_1"),
-        ("report", "call_pay"),
-    ]
-
-
-def test_a_fast_lookup_gets_no_line(monkeypatch):
-    monkeypatch.setattr(agent, "STILL_WORKING_WAITS_S", (0.5, 10.0))
-    session = FakeSession()
-    _run([_call("resp_1", "call_a"), _ended("resp_1"), InputReady()], session, monkeypatch, lookup_s=0.05)
-    assert _kinds(session) == [("result", "call_a"), ("continue", "resp_1")]
-
-
-def _drive(session, steps, monkeypatch, lookup_s: float = 0.0):
-    """Run the loop through ``steps``: events to notice, or seconds to let it run."""
-
-    def fake_dispatch(_session, name, args):
-        time.sleep(lookup_s)
-        return {"tool": name, "ok": True}
-
-    monkeypatch.setattr(agent, "dispatch", fake_dispatch)
+def _drive(session, steps, monkeypatch, lookup_s: float = 0.0) -> FakeDispatch:
+    """Run the loop through ``steps``: events to notice, seconds to let it run, or
+    "idle" to let Prism take nudges. Then wait for every open round to finish."""
+    fake = FakeDispatch(lookup_s)
+    monkeypatch.setattr(agent, "dispatch", fake)
 
     async def go():
         rounds = agent.ToolRounds(session, object())
@@ -273,11 +124,184 @@ def _drive(session, steps, monkeypatch, lookup_s: float = 0.0):
                 session.idle.set()
             else:
                 rounds.notice(step)
+        deadline = time.monotonic() + 2
+        while (rounds._rounds or not rounds._events.empty()) and not loop.done() and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
         await asyncio.sleep(0.05)
+        if loop.done():
+            return loop.result()
         loop.cancel()
         await asyncio.gather(loop, return_exceptions=True)
 
     asyncio.run(go())
+    return fake
+
+
+def _kinds(session) -> list:
+    return [entry[:2] for entry in session.log]
+
+
+def test_the_calls_of_a_reply_run_side_by_side_then_the_reply_continues(monkeypatch):
+    session = FakeSession()
+    fake = _drive(session, [
+        _call("resp_1", "call_a", "get_account"),
+        _call("resp_1", "call_b", "get_payment_arrangement"),
+        _ended("resp_1"),
+    ], monkeypatch, lookup_s=0.1)
+    assert sorted(fake.ran) == ["call_a", "call_b"]
+    assert fake.most["read"] == 2
+    assert sorted(_kinds(session)[:2]) == [("result", "call_a"), ("result", "call_b")]
+    assert _kinds(session)[2:] == [("continue", "resp_1")]
+
+
+def test_writes_run_one_at_a_time(monkeypatch):
+    """Prism can ask for the same write again while the first is still running; the
+    shared tools refuse the repeat only once the first has finished."""
+    session = FakeSession()
+    fake = _drive(session, [
+        _call("resp_1", "call_a", "create_payment_arrangement"),
+        _call("resp_2", "call_b", "create_payment_arrangement"),
+        _call("resp_2", "call_c", "set_paperless_billing"),
+        _ended("resp_1"),
+        _ended("resp_2"),
+    ], monkeypatch, lookup_s=0.1)
+    assert sorted(fake.ran) == ["call_a", "call_b", "call_c"]
+    assert fake.most["write"] == 1
+
+
+def test_a_lookup_does_not_wait_for_a_slow_write(monkeypatch):
+    session = FakeSession()
+    fake = _drive(session, [
+        _call("resp_1", "call_pay", "create_payment_arrangement"),
+        _call("resp_2", "call_look", "get_account"),
+        _ended("resp_1"),
+        _ended("resp_2"),
+    ], monkeypatch, lookup_s=0.1)
+    assert fake.most == {"write": 1, "read": 1}
+    # Both ran at once: the lookup started before the write finished.
+    assert sorted(fake.ran) == ["call_look", "call_pay"]
+
+
+def test_a_reply_without_tool_calls_is_not_continued(monkeypatch):
+    session = FakeSession()
+    _drive(session, [_ended("resp_1")], monkeypatch)
+    assert session.log == []
+
+
+def test_a_dropped_round_is_reported(monkeypatch):
+    """The caller speaks while a call runs, Prism answers them before the result is
+    in, and the round closes. Without a report, Prism never mentions the result."""
+    session = FakeSession(refuse={"resp_1": RimeInputError("the caller spoke first")})
+    _drive(session, [_call("resp_1", "call_a", "verify_caller"), _ended("resp_1"), _ended("resp_2")], monkeypatch)
+    assert _kinds(session) == [("result", "call_a"), ("continue", "resp_1"), ("report", "call_a")]
+
+
+def test_a_cancelled_reply_is_not_continued_and_its_result_is_reported(monkeypatch):
+    session = FakeSession()
+    _drive(session, [_call("resp_1", "call_a", "verify_caller"), _ended("resp_1", status="cancelled")], monkeypatch)
+    assert _kinds(session) == [("result", "call_a"), ("report", "call_a")]
+
+
+def test_a_round_superseded_by_a_newer_round_is_not_reported(monkeypatch):
+    """Prism answers the caller with a reply that makes its own call. The newer
+    round continues with every result in the history, so reporting the old one would
+    repeat the answer. No call runs twice."""
+    session = FakeSession(refuse={"resp_1": RimeInputError("the caller spoke first")})
+    fake = _drive(session, [
+        _call("resp_1", "call_a"),
+        _ended("resp_1"),
+        _call("resp_2", "call_b", "get_payment_arrangement"),
+        _ended("resp_2"),
+    ], monkeypatch)
+    assert sorted(fake.ran) == ["call_a", "call_b"]
+    assert sorted(_kinds(session)) == [
+        ("continue", "resp_1"),
+        ("continue", "resp_2"),
+        ("result", "call_a"),
+        ("result", "call_b"),
+    ]
+
+
+def test_no_report_while_a_newer_round_is_still_open(monkeypatch):
+    session = FakeSession(refuse={"resp_1": RimeInputError("the caller spoke first")})
+    _drive(session, [_call("resp_1", "call_a"), _ended("resp_1"), _call("resp_2", "call_b")], monkeypatch)
+    assert ("report", "call_a") not in _kinds(session)
+
+
+def test_no_report_when_prism_answered_the_caller_after_the_result(monkeypatch):
+    """The caller asked again after the result went in, and Prism's answer had the
+    result in its history."""
+    session = FakeSession(refuse={"resp_1": RimeInputError("the caller spoke first")})
+    session.before_continue = [_started("resp_2", "speech")]
+    _drive(session, [_call("resp_1", "call_a"), _ended("resp_1"), _ended("resp_2")], monkeypatch)
+    assert _kinds(session) == [("result", "call_a"), ("continue", "resp_1")]
+
+
+def test_an_answer_that_started_before_the_result_still_gets_the_report(monkeypatch):
+    """Prism answered the caller before a write's result was in, so the answer could
+    not use it, and the report still goes out."""
+    session = FakeSession(refuse={"resp_1": RimeInputError("the caller spoke first")})
+    _drive(session, [
+        _call("resp_1", "call_pay", "create_payment_arrangement"),
+        _ended("resp_1"),
+        _started("resp_2", "speech"),
+        _ended("resp_2"),
+    ], monkeypatch, lookup_s=0.05)
+    assert _kinds(session)[-1] == ("report", "call_pay")
+
+
+@pytest.mark.parametrize("code", sorted(agent.SUPERSEDED_CODES))
+def test_prism_refusing_the_continuation_drops_the_round(monkeypatch, code):
+    session = FakeSession(refuse={"resp_1": _superseded(code)})
+    fake = _drive(session, [_call("resp_1", "call_pay", "make_payment"), _ended("resp_1")], monkeypatch)
+    assert fake.ran == ["call_pay"]
+    assert [entry[0] for entry in session.log] == ["result", "continue", "report"]
+
+
+def test_any_other_continuation_error_fails_the_call(monkeypatch):
+    fault = RealtimeFault(code="invalid_tool_continuation", message="no parent", scope="event")
+    session = FakeSession(refuse={"resp_1": RimeRealtimeError(fault)})
+    with pytest.raises(ExceptionGroup) as failure:
+        _drive(session, [_call("resp_1", "call_a"), _ended("resp_1")], monkeypatch)
+    assert failure.group_contains(RimeRealtimeError, match="invalid_tool_continuation")
+
+
+def test_a_report_the_caller_talks_over_is_skipped(monkeypatch):
+    session = FakeSession(
+        refuse={"resp_1": RimeInputError("the caller spoke first")},
+        refuse_report=_superseded("nudge_superseded"),
+    )
+    fake = _drive(session, [
+        _call("resp_1", "call_a"),
+        _ended("resp_1"),
+        0.1,
+        _call("resp_2", "call_b"),
+        _ended("resp_2"),
+    ], monkeypatch)
+    assert sorted(fake.ran) == ["call_a", "call_b"]
+    assert _kinds(session)[-2:] == [("result", "call_b"), ("continue", "resp_2")]
+
+
+def test_a_slow_lookup_gets_a_still_working_line_and_then_the_report(monkeypatch):
+    """Rime's slow-tool pattern. The line closes the round, so the result is
+    reported with a nudge."""
+    monkeypatch.setattr(agent, "STILL_WORKING_WAITS_S", (0.05, 10.0))
+    session = FakeSession(refuse={"resp_1": RimeInputError("the line closed the round")})
+    _drive(session, [_call("resp_1", "call_pay", "create_payment_arrangement"), _ended("resp_1")],
+           monkeypatch, lookup_s=0.2)
+    assert _kinds(session) == [
+        ("line", agent.STILL_WORKING),
+        ("result", "call_pay"),
+        ("continue", "resp_1"),
+        ("report", "call_pay"),
+    ]
+
+
+def test_a_fast_lookup_gets_no_line(monkeypatch):
+    monkeypatch.setattr(agent, "STILL_WORKING_WAITS_S", (0.5, 10.0))
+    session = FakeSession()
+    _drive(session, [_call("resp_1", "call_a"), _ended("resp_1")], monkeypatch, lookup_s=0.05)
+    assert _kinds(session) == [("result", "call_a"), ("continue", "resp_1")]
 
 
 def test_a_held_report_is_withdrawn_when_prism_answers_the_caller(monkeypatch):
@@ -289,13 +313,11 @@ def test_a_held_report_is_withdrawn_when_prism_answers_the_caller(monkeypatch):
     _drive(session, [
         _call("resp_1", "call_a", "create_payment_arrangement"),
         _ended("resp_1"),
-        InputReady(),
         0.05,  # the report waits for Prism to be idle
         _started("resp_2", "speech"),
         _call("resp_2", "call_b", "get_payment_arrangement"),
         _ended("resp_2"),
         "idle",
-        InputReady(),
     ], monkeypatch)
     assert _kinds(session) == [
         ("result", "call_a"),
