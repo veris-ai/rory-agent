@@ -37,11 +37,13 @@ format (GA schema):
 3. Forward the caller's PCM16 frames as `input_audio_buffer.append`, and the
    reply's `response.output_audio.delta` bytes straight back. Both legs are
    24 kHz, so nothing is resampled.
-4. Collect `response.function_call_arguments.done`. When the response ends
-   `completed`, run each call through `rory_tools.dispatch` on a worker
-   thread, answer with a `function_call_output`, then send `response.create`,
-   since a tool result never starts a turn on its own. A call from a response
-   the caller cancelled by barging in is never run.
+4. Run each `response.function_call_arguments.done` through
+   `rory_tools.dispatch` as soon as it arrives, on a worker thread and one at
+   a time, while the call's spoken `utterance` plays. Answer with a
+   `function_call_output`. Once the response ends `completed` and its calls
+   have answered, send `response.create`, since a tool result never starts a
+   turn on its own. A response the caller cancelled by barging in gets no
+   `response.create`, because the barge-in starts its own.
 
 ```mermaid
 flowchart LR
@@ -158,7 +160,8 @@ The parity run checks the tools sent in `session.update` against the shared
 declaration, allowing only the `utterance` argument described above. The
 lifecycle tests run a whole call against a local websocket
 standing in for PolyAI (handshake, greeting, audio both ways, one tool
-round), plus the refused-session path, cancelled tool calls, failure events
+round run while its hold line plays), plus the refused-session path,
+tool calls in cancelled responses, failure events
 and the close codes. The model and the voice need a live session and a key.
 
 ## Known limits
@@ -172,12 +175,6 @@ and the close codes. The model and the voice need a live session and a key.
   refused with `conversation_already_has_active_response`, and the call ends
   with that error. PolyAI holds a request sent while the caller is still
   speaking, so this needs a turn that has already been committed.
-- **A tool starts after its hold line has played.** PolyAI sends
-  `response.done` only once the spoken `utterance` finishes, and the bridge
-  runs a tool only on a completed response, so a cancelled call never runs.
-  Live, that put `verify_caller` 2.3 s and `transfer_to_human` 3.2 s after the
-  model finished writing the call. A slow tool's own time adds to the hold
-  line rather than overlapping it.
 - **English only**, for now.
 - **Session length.** 60 minutes per session and a 5-minute idle timeout,
   both far beyond a bench call.

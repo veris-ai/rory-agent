@@ -21,8 +21,10 @@ Where it differs from the other OpenAI-Realtime-shaped bridges:
   tools.py); the rest is the shared prompt verbatim.
 - No ``conversation.item.truncate`` on barge-in. The server speaks and paces
   the reply, so it knows what the caller heard and cuts history itself.
-- Tool calls run on ``response.done`` with status ``completed``. A call from
-  a response the caller cancelled by barging in is never dispatched.
+- Each tool runs on its own task the moment its call is written. PolyAI
+  speaks the call's ``utterance`` while the tool runs and sends that audio at
+  the pace it plays, so running the tool inline would stall the line, and
+  ``response.done`` arrives only once the line has played.
 - No turn timing is pinned: the model confirms every turn end, and the
   service ignores the silence settings the other candidates pin.
 
@@ -113,17 +115,21 @@ async def run_voice_ws_bot(actor_ws: WebSocket) -> None:
             },
         }))
 
-        up = asyncio.create_task(_pump_actor_to_rsn(actor_ws, rsn_ws))
-        down = asyncio.create_task(_pump_rsn_to_actor(rsn_ws, actor_ws, session_state))
+        calls: asyncio.Queue = asyncio.Queue()
+        tasks = {
+            asyncio.create_task(_pump_actor_to_rsn(actor_ws, rsn_ws)),
+            asyncio.create_task(_pump_rsn_to_actor(rsn_ws, actor_ws, calls)),
+            asyncio.create_task(_run_tools(rsn_ws, session_state, calls)),
+        }
         try:
-            done, _ = await asyncio.wait({up, down}, return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 task.result()
         finally:
-            for task in (up, down):
+            for task in tasks:
                 if not task.done():
                     task.cancel()
-            await asyncio.gather(up, down, return_exceptions=True)
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _pump_actor_to_rsn(actor_ws: WebSocket, rsn_ws) -> None:
@@ -139,14 +145,8 @@ async def _pump_actor_to_rsn(actor_ws: WebSocket, rsn_ws) -> None:
         logger.info("[voice] actor disconnected")
 
 
-async def _pump_rsn_to_actor(rsn_ws, actor_ws: WebSocket, session_state: CallSession) -> None:
-    """Dialog-RSN-1 events → reply audio to the actor; run each completed tool call.
-
-    A tool result never starts a turn on its own, so every tool round ends
-    with a ``response.create``.
-    """
-    tool_calls: list[dict] = []
-
+async def _pump_rsn_to_actor(rsn_ws, actor_ws: WebSocket, calls: asyncio.Queue) -> None:
+    """Dialog-RSN-1 events → reply audio to the actor; tool calls and response ends → ``calls``."""
     async for raw in rsn_ws:
         event = json.loads(raw)
         event_type = event["type"]
@@ -161,33 +161,46 @@ async def _pump_rsn_to_actor(rsn_ws, actor_ws: WebSocket, session_state: CallSes
             logger.info(f"[voice] caller_said: {event['transcript']}")
 
         elif event_type == "response.function_call_arguments.done":
-            tool_calls.append(event)
+            calls.put_nowait(event)
 
         elif event_type == "response.done":
             response = event["response"]
-            calls, tool_calls = tool_calls, []
-            if response["status"] == "cancelled":
-                # A confirmed barge-in. The caller's turn gets its own response.
-                continue
-            if response["status"] != "completed":
+            if response["status"] not in ("completed", "cancelled"):
                 raise RuntimeError(f"Dialog-RSN-1 response {response['status']}: {response}")
-            for call in calls:
-                args = json.loads(call["arguments"])
-                # Every vendor client blocks; inline, a slow one would stall
-                # the caller's audio. Awaiting keeps calls sequential, since
-                # they share account state.
-                result = await asyncio.to_thread(dispatch, session_state, call["name"], args)
-                logger.info(f"[voice] tool {call['name']} ({call['call_id']}) -> {json.dumps(result, default=str)}")
-                await rsn_ws.send(json.dumps({
-                    "type": "conversation.item.create",
-                    "item": {
-                        "type": "function_call_output",
-                        "call_id": call["call_id"],
-                        "output": json.dumps(result, default=str),
-                    },
-                }))
-            if calls:
-                await rsn_ws.send(json.dumps({"type": "response.create"}))
+            calls.put_nowait(response["status"])
 
         elif event_type == "error":
             raise RuntimeError(f"Dialog-RSN-1 error: {event['error']}")
+
+
+async def _run_tools(rsn_ws, session_state: CallSession, calls: asyncio.Queue) -> None:
+    """Run each tool call in the order written; continue once its response is done.
+
+    A response's status is queued behind its calls, so the ``response.create``
+    that follows waits for both the results and the spoken line, since a tool
+    result never starts a turn on its own. A cancelled response gets none: the
+    caller's barge-in starts its own, and the results it missed are in the
+    conversation for the turn after.
+    """
+    answered = False
+    while True:
+        call = await calls.get()
+        if isinstance(call, str):
+            if call == "completed" and answered:
+                await rsn_ws.send(json.dumps({"type": "response.create"}))
+            answered = False
+            continue
+        args = json.loads(call["arguments"])
+        # Every vendor client blocks, so each runs on a worker thread; one at
+        # a time, since they share account state.
+        result = await asyncio.to_thread(dispatch, session_state, call["name"], args)
+        logger.info(f"[voice] tool {call['name']} ({call['call_id']}) -> {json.dumps(result, default=str)}")
+        await rsn_ws.send(json.dumps({
+            "type": "conversation.item.create",
+            "item": {
+                "type": "function_call_output",
+                "call_id": call["call_id"],
+                "output": json.dumps(result, default=str),
+            },
+        }))
+        answered = True
