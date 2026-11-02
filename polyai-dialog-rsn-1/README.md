@@ -90,29 +90,42 @@ treats any text it writes as the end of its turn (PolyAI's prompt guide: "One
 output per turn"), so a line like "tell the caller, then transfer" hands the
 floor back before the transfer runs, which cuts tool chains short.
 [`agent_desc.txt`](rory_polyai_dialog_rsn_1/agent_desc.txt) is a copy of
-[`rory_tools/agent_desc.txt`](../rory_tools/agent_desc.txt) with five changes:
-one new rule (make the tool call first, speak once it returns) and four
-"tell the caller, then transfer" lines reordered to call `transfer_to_human`
-first. `transfer_to_human` already answers "Tell the caller they are being
-transferred, then stop.", so the new order fits it. See the changes with:
+[`rory_tools/agent_desc.txt`](../rory_tools/agent_desc.txt) with six lines
+changed: one new rule (put the words in the tool's `utterance`, and don't say
+them again once it returns), `verify_caller` called with a holding line, and
+four "tell the caller, then transfer" lines rewritten as "call
+`transfer_to_human` with `utterance` set to…". See them with:
 
 ```bash
 diff rory_tools/agent_desc.txt polyai-dialog-rsn-1/rory_polyai_dialog_rsn_1/agent_desc.txt
 ```
 
-The greeting and the tools are still the shared ones. A change to the shared
-prompt has to be copied here by hand.
+The greeting is still the shared one. A change to the shared prompt has to be
+copied here by hand.
 
-## Silent tool turns
+## Speaking while a tool runs
 
 Dialog-RSN-1 outputs either text or one tool call, never both, and a turn
-runs tool, tool, ..., text. So **the caller hears nothing while a chain of
-tools runs**, until the final reply. PolyAI's fix is `poly_spoken`: a required
-string argument on each slow tool that the model fills with a hold line the
-service speaks while the tool runs. It is not used here, because it would
-give every tool an argument the other candidates' tools don't have, and the
-parity run would fail. Expect longer silences on lookups than candidates that
-can speak and call a tool in the same response.
+runs tool, tool, ..., text. Without help, **the caller hears nothing while a
+chain of tools runs**. PolyAI's fix is its `poly_spoken` extension: a required
+string argument the model fills as part of the call, which the server speaks
+at once. Two tools get one, named `utterance`
+([`tools.py`](rory_polyai_dialog_rsn_1/tools.py)):
+
+- `verify_caller`, the first lookup of every call ("One moment while I check
+  those details.").
+- `transfer_to_human`, so the caller hears why they're being put through.
+
+This is the one place the tool surface departs from the shared declaration.
+The parity run checks that only these two tools carry `utterance`, that it is
+a required `poly_spoken` string, and that everything else matches exactly.
+The shared implementations read only their own arguments, so `utterance`
+reaches `dispatch` unread. Other tools stay silent until the reply, as
+PolyAI's guide advises for fast tools.
+
+`transfer_to_human` still answers "Tell the caller they are being
+transferred, then stop.", so after the hold line Rory usually confirms the
+transfer once more in its closing reply.
 
 ## Configuration
 
@@ -142,7 +155,8 @@ uv run pytest polyai-dialog-rsn-1/tests
 ```
 
 The parity run checks the tools sent in `session.update` against the shared
-declaration. The lifecycle tests run a whole call against a local websocket
+declaration, allowing only the `utterance` argument described above. The
+lifecycle tests run a whole call against a local websocket
 standing in for PolyAI (handshake, greeting, audio both ways, one tool
 round), plus the refused-session path, cancelled tool calls, failure events
 and the close codes. The model and the voice need a live session and a key.
@@ -158,6 +172,12 @@ and the close codes. The model and the voice need a live session and a key.
   refused with `conversation_already_has_active_response`, and the call ends
   with that error. PolyAI holds a request sent while the caller is still
   speaking, so this needs a turn that has already been committed.
+- **A tool starts after its hold line has played.** PolyAI sends
+  `response.done` only once the spoken `utterance` finishes, and the bridge
+  runs a tool only on a completed response, so a cancelled call never runs.
+  Live, that put `verify_caller` 2.3 s and `transfer_to_human` 3.2 s after the
+  model finished writing the call. A slow tool's own time adds to the hold
+  line rather than overlapping it.
 - **English only**, for now.
 - **Session length.** 60 minutes per session and a 5-minute idle timeout,
   both far beyond a bench call.

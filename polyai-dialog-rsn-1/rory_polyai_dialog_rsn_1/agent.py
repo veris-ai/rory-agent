@@ -17,7 +17,8 @@ Where it differs from the other OpenAI-Realtime-shaped bridges:
 - Its own prompt, ``agent_desc.txt`` beside this module. Dialog-RSN-1 treats
   any text it writes as the end of its turn, so the shared prompt's "tell the
   caller, then transfer" lines would end the turn before the transfer. The
-  copy here puts the tool call first; the rest is the shared prompt verbatim.
+  copy here puts the words in the tool call's spoken ``utterance`` (see
+  tools.py); the rest is the shared prompt verbatim.
 - No ``conversation.item.truncate`` on barge-in. The server speaks and paces
   the reply, so it knows what the caller heard and cuts history itself.
 - Tool calls run on ``response.done`` with status ``completed``. A call from

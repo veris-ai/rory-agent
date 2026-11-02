@@ -6,7 +6,7 @@ rather than negotiate a shutoff — so two candidates reading different prompts
 are not two measurements of the same agent. There is exactly one
 ``agent_desc.txt``, inside the rory-core package, and every transport loads it
 from here, except ``polyai-dialog-rsn-1``: its model ends the turn at the first
-words it says, so it carries a copy that puts each tool call first.
+words it says, so it carries a copy that puts the words inside the tool call.
 """
 
 from __future__ import annotations

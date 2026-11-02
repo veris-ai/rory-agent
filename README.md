@@ -79,7 +79,10 @@ A transport is expected to use three things — `SCHEMAS`, `CallSession`, and
 does not get to reword a tool description, re-implement the verification gate,
 or carry its own prompt. The one exception is `polyai-dialog-rsn-1`: Dialog-RSN-1
 ends its turn at the first words it says, so it carries a copy of the prompt
-that puts each tool call before the words (see its README).
+that puts the words inside the tool call, and gives `verify_caller` and
+`transfer_to_human` one extra spoken argument, `utterance`, through PolyAI's
+`poly_spoken` extension. Its parity test allows exactly that argument (see its
+README).
 
 Parity is enforced per transport: each `<dir>/tests/test_parity_*.py` reads the
 tool declarations back out of the objects it actually hands its framework and checks
