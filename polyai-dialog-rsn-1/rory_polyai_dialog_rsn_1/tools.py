@@ -21,12 +21,10 @@ SPOKEN_ARGUMENT = "utterance"
 SPOKEN_TOOLS = {
     "verify_caller": (
         "A short line to say to the caller while their details are checked, "
-        "for example 'One moment while I check those details.' Never repeat "
-        "their details back in it."
+        "for example 'One moment while I check those details.'"
     ),
     "transfer_to_human": (
-        "What to tell the caller as you transfer them: that you're putting "
-        "them through to someone who can help with this today."
+        "What to tell the caller as you transfer them."
     ),
 }
 
