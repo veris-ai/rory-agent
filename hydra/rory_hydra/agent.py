@@ -71,6 +71,16 @@ LOG_EVERY_N_FRAMES = 50
 
 AGENT_PROMPT = load_agent_prompt()
 
+# Hydra speaks first only through ``generate_initial_response``, and Smallest's
+# docs pair that flag with an opening-line instruction in the system prompt.
+# The shared prompt says the greeting already happened, so this overrides that
+# note, the same way the Gradium transport does.
+OPENING_LINE = f"""# Opening line
+Disregard the note above about having already greeted the caller: on this
+platform your first turn *is* the greeting. The call has just connected and
+nobody has spoken. Open with exactly: "{GREETING}" Then stop and wait for the
+caller to respond. Do not greet again after that."""
+
 
 def _hydra_url() -> str:
     """Built per call so a missing credential fails at connect, not at import."""
@@ -84,12 +94,9 @@ def _session_configure() -> dict:
 
     Persona, voice and audio format are frozen at handshake — only ``tools``
     can change later via ``session.update`` — so every knob that matters for a
-    reproducible run is pinned here. ``generate_initial_response`` is left off
-    (the documented default): the shared prompt tells the model it already
-    greeted the caller, which would make the vendor's own speak-first flag
-    paraphrase an opening line that contradicts its own system instructions.
-    The greeting is instead forced open with a per-response override, the same
-    way the Grok Voice transport does it — see ``_greeting_trigger``.
+    reproducible run is pinned here. ``generate_initial_response`` is on: it is
+    Hydra's only documented way to speak before any caller audio, and
+    ``OPENING_LINE`` pins what that first turn says.
 
     The date context is appended rather than baked into ``agent_desc.txt``
     because it is resolved per call, off the frozen clock the attempt restored
@@ -98,35 +105,10 @@ def _session_configure() -> dict:
     return {
         "type": "session.configure",
         "session": {
-            "instructions": f"{AGENT_PROMPT}\n\n{today_context()}",
+            "instructions": f"{AGENT_PROMPT}\n\n{today_context()}\n\n{OPENING_LINE}",
             "voice": HYDRA_VOICE,
             "tools": TOOLS,
-            "generate_initial_response": False,
-        },
-    }
-
-
-def _greeting_trigger() -> dict:
-    """Forces the opening line despite the session instructions' own claim.
-
-    Hydra's turn-taking is entirely server-driven with no documented way to
-    seed an assistant turn or send a text conversation item (there is no
-    transcript on the wire — audio is the payload), so there is no Pipecat- or
-    Gemini-Live-style way to pre-render or textually request the greeting.
-    ``response.create`` is the one documented lever: Smallest's tool-calling
-    docs use it to make Hydra narrate a tool result on demand, so it is a real,
-    client-triggerable event in this protocol. Whether its ``response.instructions``
-    override is honoured the way Grok Voice's is has not been confirmed against a
-    live session; if Hydra ignores it, the caller hears Hydra's own persona-driven
-    opening rather than a broken call.
-    """
-    return {
-        "type": "response.create",
-        "response": {
-            "instructions": (
-                "Open the call by greeting the caller now. Say exactly: "
-                f'"{GREETING}" Then stop and wait for the caller to respond.'
-            ),
+            "generate_initial_response": True,
         },
     }
 
@@ -165,9 +147,6 @@ async def run_voice_ws_bot(actor_ws: WebSocket) -> None:
                 f"[voice] session.configured: {len(TOOLS)} tools, "
                 f"instructions={len(AGENT_PROMPT)} chars, output_rate={output_rate}Hz"
             )
-
-            await hy_ws.send(json.dumps(_greeting_trigger()))
-            logger.info("[voice] sent greeting trigger (agent greets first)")
 
             up = asyncio.create_task(_pump_actor_to_hydra(actor_ws, hy_ws), name="actor->hydra")
             down = asyncio.create_task(

@@ -60,7 +60,7 @@ def test_session_keeps_hydra_shape():
     session = agent._session_configure()["session"]
     assert session["voice"] == agent.HYDRA_VOICE
     assert session["instructions"].startswith(agent.AGENT_PROMPT)
-    assert session["generate_initial_response"] is False
+    assert session["generate_initial_response"] is True
     assert session["tools"] is tools.TOOLS
 
 
@@ -68,10 +68,10 @@ def test_output_rate_table_covers_the_default_model():
     assert agent.HYDRA_OUTPUT_RATE_HZ[agent.HYDRA_MODEL] == 24000
 
 
-def test_greeting_trigger_forces_the_exact_wording():
-    trigger = agent._greeting_trigger()
-    assert trigger["type"] == "response.create"
-    assert agent.GREETING in trigger["response"]["instructions"]
+def test_opening_line_pins_the_exact_greeting():
+    instructions = agent._session_configure()["session"]["instructions"]
+    assert instructions.endswith(agent.OPENING_LINE)
+    assert f'Open with exactly: "{agent.GREETING}"' in agent.OPENING_LINE
 
 
 def test_candidate_fails_closed_without_its_credential():

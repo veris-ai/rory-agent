@@ -21,14 +21,13 @@ a `response.create` after the completed tool round asks Hydra to narrate the
 result — the same sequence the tool-calling docs describe.
 
 There is no transcript on the wire in either direction — audio is the only
-payload — so unlike Gemini Live this transport has no way to send a text
-turn requesting the greeting. Instead, `generate_initial_response` is left at
-its default (off) and the opening line is forced the way the Grok Voice
-transport forces it: a `response.create` with a per-response `instructions`
-override, sent once right after `session.configured`. Whether Hydra honours
-that override has not been confirmed against a live session — if it doesn't,
-the caller hears Hydra's own persona-driven opening instead of the pinned
-greeting, not a broken call.
+payload — so there is no text turn to request the greeting with. The opening
+line uses the lever Smallest documents for it: `generate_initial_response: true`
+in `session.configure` makes Hydra speak before any caller audio, paired with
+an opening-line instruction appended to the shared prompt (the same override
+the Gradium transport uses, since the shared prompt says the greeting already
+happened). An earlier `response.create` with a per-response `instructions`
+override is undocumented for Hydra, and in simulation Hydra never answered it.
 
 ## Audio
 
