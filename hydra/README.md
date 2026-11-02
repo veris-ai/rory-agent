@@ -17,8 +17,10 @@ for `session.configured` before sending any audio — frames sent earlier are
 silently dropped. From there, tool calls reuse OpenAI-Realtime-shaped event
 names: `response.function_call_arguments.done` arrives from the vendor,
 `conversation.item.create` with a `function_call_output` item answers it, and
-a `response.create` after the completed tool round asks Hydra to narrate the
-result — the same sequence the tool-calling docs describe.
+one `response.create` about 200 ms after the round's last tool output asks
+Hydra to narrate the result — the debounce the tool-calling docs prescribe.
+It does not wait for `response.done`: in simulation Hydra often sent none for
+a tool-calling response, and the call went silent.
 
 There is no transcript on the wire in either direction — audio is the only
 payload — so there is no text turn to request the greeting with. The opening

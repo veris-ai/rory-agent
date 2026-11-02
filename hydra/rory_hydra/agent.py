@@ -66,6 +66,10 @@ HYDRA_OUTPUT_RATE_HZ = {
     "hydra": 48000,  # deprecated alias of hydra-v1.0
 }
 
+# Smallest's tool-calling docs: after the last function_call_output of a round,
+# send one response.create about 200 ms later so Hydra narrates the result.
+NARRATE_DEBOUNCE_S = 0.2
+
 # Roughly one heartbeat per second at 20 ms frames.
 LOG_EVERY_N_FRAMES = 50
 
@@ -212,16 +216,23 @@ async def _pump_hydra_to_actor(
     ``hydra-v1.1``, which already outputs 24 kHz).
 
     A function call's output goes back as a ``function_call_output`` item; the
-    model does not resume on its own, so ``response.done`` after a completed
-    tool round kicks the next ``response.create``. A response cancelled by a
-    caller barge-in (``status: "cancelled"``) is not resumed — the caller is
-    already mid-turn, and the next natural response covers it.
+    model does not resume on its own, so one ``response.create`` follows
+    ``NARRATE_DEBOUNCE_S`` after the round's last output, as Smallest's
+    tool-calling docs prescribe. It does not wait for ``response.done``: Hydra
+    does not reliably send one for a tool-calling response. A response
+    cancelled by a caller barge-in (``status: "cancelled"``) is not resumed —
+    the caller is already mid-turn, and the next natural response covers it.
     """
-    pending_tool_response = False
+    narrate: asyncio.Task | None = None
     n_audio_frames = 0
     n_audio_bytes = 0
     n_responses = 0
     resample_state = None  # carried across ratecv calls on the outbound leg, if used
+
+    async def _narrate() -> None:
+        await asyncio.sleep(NARRATE_DEBOUNCE_S)
+        await hy_ws.send(json.dumps({"type": "response.create"}))
+        logger.info("[hy->a] tool round done — sent response.create")
 
     try:
         async for raw in hy_ws:
@@ -277,7 +288,9 @@ async def _pump_hydra_to_actor(
                         f"arguments truncated — not dispatched: {raw_args!r}"
                     )
                     continue
-                pending_tool_response = True
+                # Another call in the same round: narrate after its output instead.
+                if narrate is not None:
+                    narrate.cancel()
                 # Every vendor client is blocking, and this coroutine is
                 # carrying the caller's audio. Called inline, a vendor timeout
                 # is dead air on the mic leg — the same reason every other
@@ -295,19 +308,14 @@ async def _pump_hydra_to_actor(
                         "output": json.dumps(result, default=str),
                     },
                 }))
+                narrate = asyncio.create_task(_narrate())
 
             elif etype == "response.done":
                 status = (evt.get("response") or {}).get("status")
-                if status == "completed" and pending_tool_response:
-                    pending_tool_response = False
-                    logger.info("[hy->a] response.done after tool — kicking next response.create")
-                    await hy_ws.send(json.dumps({"type": "response.create"}))
-                elif status == "cancelled":
-                    pending_tool_response = False
+                if status == "cancelled":
                     reason = ((evt.get("response") or {}).get("status_details") or {}).get("reason")
                     logger.info(f"[hy->a] response.done cancelled (reason={reason}) — barge-in")
                 else:
-                    pending_tool_response = False
                     logger.info(
                         f"[hy->a] response.done status={status} — session totals "
                         f"{n_audio_frames} frames / {n_audio_bytes} bytes"
@@ -323,3 +331,6 @@ async def _pump_hydra_to_actor(
         )
     except WebSocketDisconnect:
         logger.info("[hy->a] actor WS closed; ending Hydra receive loop")
+    finally:
+        if narrate is not None:
+            narrate.cancel()

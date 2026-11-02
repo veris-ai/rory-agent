@@ -31,6 +31,7 @@ class FakeHydra:
 
     async def __anext__(self):
         if not self._events:
+            await asyncio.sleep(0.05)  # a live socket stays open past the debounce
             raise StopAsyncIteration
         return json.dumps(self._events.pop(0))
 
@@ -46,6 +47,7 @@ def _run(events: list[dict], monkeypatch):
         return {"ok": True}
 
     monkeypatch.setattr(agent, "dispatch", fake_dispatch)
+    monkeypatch.setattr(agent, "NARRATE_DEBOUNCE_S", 0.01)
     hy_ws = FakeHydra(events)
     actor_ws = AsyncMock()
     asyncio.run(
@@ -81,8 +83,7 @@ def test_truncated_arguments_are_skipped_and_bridging_continues(monkeypatch):
     assert calls == [("verify_caller", {"account_number": "0000-00001", "name_on_account": "Ana"})]
     outputs = [m for m in sent if m["type"] == "conversation.item.create"]
     assert [m["item"]["call_id"] for m in outputs] == ["call_ok"]
-    # The cancelled response's response.done must not kick a response.create;
-    # only the completed tool round does.
+    # The skipped call schedules no narration; only the dispatched one does.
     assert [m["type"] for m in sent].count("response.create") == 1
 
 
@@ -116,3 +117,36 @@ def test_barge_in_cancellation_is_not_fatal_and_resets_pending_state(monkeypatch
 
     assert calls == []
     assert sent == []
+
+
+def test_narration_does_not_wait_for_response_done(monkeypatch):
+    """Hydra often sends no response.done for a tool-calling response; in
+    simulation, waiting for one left the call silent."""
+    events = [
+        {
+            "type": "response.function_call_arguments.done",
+            "name": "verify_caller",
+            "call_id": "call_1",
+            "arguments": '{"account_number":"0000-00001","name_on_account":"Ana"}',
+        },
+    ]
+
+    calls, sent = _run(events, monkeypatch)
+
+    assert [m["type"] for m in sent] == ["conversation.item.create", "response.create"]
+
+
+def test_one_narration_per_multi_tool_round(monkeypatch):
+    events = [
+        {"type": "response.function_call_arguments.done", "name": "get_account", "call_id": "a", "arguments": "{}"},
+        {"type": "response.function_call_arguments.done", "name": "list_bills", "call_id": "b", "arguments": "{}"},
+    ]
+
+    calls, sent = _run(events, monkeypatch)
+
+    assert [name for name, _ in calls] == ["get_account", "list_bills"]
+    assert [m["type"] for m in sent] == [
+        "conversation.item.create",
+        "conversation.item.create",
+        "response.create",
+    ]
