@@ -39,7 +39,9 @@ format (GA schema):
    24 kHz, so nothing is resampled.
 4. Run each `response.function_call_arguments.done` through
    `rory_tools.dispatch` as soon as it arrives, on a worker thread and one at
-   a time, while the call's spoken `utterance` plays. Answer with a
+   a time, while the call's spoken `utterance` plays (PolyAI's
+   [OpenAI migration guide](https://docs.poly.ai/dialog-rsn-1/coding-agents/openai-realtime-migration.md):
+   "The tool starts at once."). Answer with a
    `function_call_output`. Once the response ends `completed` and its calls
    have answered, send `response.create`, since a tool result never starts a
    turn on its own. A response the caller cancelled by barging in gets no
@@ -172,9 +174,11 @@ and the close codes. The model and the voice need a live session and a key.
   parallelism at or below the account's cap.
 - **One response at a time.** If the caller's turn opens a response while a
   tool round is still running, the bridge's follow-up `response.create` is
-  refused with `conversation_already_has_active_response`, and the call ends
-  with that error. PolyAI holds a request sent while the caller is still
-  speaking, so this needs a turn that has already been committed.
+  refused with `conversation_already_has_active_response`. PolyAI's
+  [error table](https://docs.poly.ai/api-reference/dialog-rsn-1/reference.md#errors)
+  makes that retryable after `response.done`, so the bridge sends it again
+  when the open response ends. If that response already answered the
+  results, the caller hears two replies in a row.
 - **English only**, for now.
 - **Session length.** 60 minutes per session and a 5-minute idle timeout,
   both far beyond a bench call.

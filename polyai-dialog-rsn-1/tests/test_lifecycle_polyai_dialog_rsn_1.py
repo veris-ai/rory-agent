@@ -277,6 +277,30 @@ def test_a_call_in_a_cancelled_response_runs_and_answers_without_a_continuation(
     ]
 
 
+REFUSED = {
+    "type": "error",
+    "error": {"code": "conversation_already_has_active_response", "message": "A response is already in progress."},
+}
+
+
+@pytest.mark.parametrize("status", ["completed", "cancelled"])
+def test_a_refused_continuation_is_sent_again_when_the_open_response_ends(monkeypatch, status):
+    monkeypatch.setattr(agent, "dispatch", lambda state, name, args: {"ok": True})
+    sent = _bridge([_call("get_account", "a"), _done(), REFUSED, _done(status)])
+    assert [message["type"] for message in sent] == [
+        "conversation.item.create", "response.create", "response.create",
+    ]
+
+
+def test_a_refused_continuation_and_the_open_responses_own_round_share_one_request(monkeypatch):
+    monkeypatch.setattr(agent, "dispatch", lambda state, name, args: {"ok": True})
+    sent = _bridge([_call("get_account", "a"), _done(), REFUSED, _call("get_account", "b"), _done()])
+    assert [message["type"] for message in sent] == [
+        "conversation.item.create", "response.create",
+        "conversation.item.create", "response.create",
+    ]
+
+
 @pytest.mark.parametrize("event", [
     {"type": "error", "error": {"code": "generation_failed", "message": "Backend failure"}},
     _done("failed"),

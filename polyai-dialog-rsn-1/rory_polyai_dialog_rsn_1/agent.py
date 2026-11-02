@@ -21,10 +21,11 @@ Where it differs from the other OpenAI-Realtime-shaped bridges:
   tools.py); the rest is the shared prompt verbatim.
 - No ``conversation.item.truncate`` on barge-in. The server speaks and paces
   the reply, so it knows what the caller heard and cuts history itself.
-- Each tool runs on its own task the moment its call is written. PolyAI
-  speaks the call's ``utterance`` while the tool runs and sends that audio at
-  the pace it plays, so running the tool inline would stall the line, and
-  ``response.done`` arrives only once the line has played.
+- Each tool runs on its own task the moment its call is written, as PolyAI's
+  OpenAI migration guide says. PolyAI speaks the call's ``utterance`` while
+  the tool runs and sends that audio at the pace it plays, so running the
+  tool inline would stall the line, and ``response.done`` arrives only once
+  the line has played.
 - No turn timing is pinned: the model confirms every turn end, and the
   service ignores the silence settings the other candidates pin.
 
@@ -170,7 +171,9 @@ async def _pump_rsn_to_actor(rsn_ws, actor_ws: WebSocket, calls: asyncio.Queue) 
             calls.put_nowait(response["status"])
 
         elif event_type == "error":
-            raise RuntimeError(f"Dialog-RSN-1 error: {event['error']}")
+            if event["error"]["code"] != "conversation_already_has_active_response":
+                raise RuntimeError(f"Dialog-RSN-1 error: {event['error']}")
+            calls.put_nowait("refused")
 
 
 async def _run_tools(rsn_ws, session_state: CallSession, calls: asyncio.Queue) -> None:
@@ -181,14 +184,25 @@ async def _run_tools(rsn_ws, session_state: CallSession, calls: asyncio.Queue) -
     result never starts a turn on its own. A cancelled response gets none: the
     caller's barge-in starts its own, and the results it missed are in the
     conversation for the turn after.
+
+    If the caller spoke during the round, the server may have opened a
+    response of its own, and the ``response.create`` is refused with
+    ``conversation_already_has_active_response``. PolyAI's error table makes
+    that retryable after ``response.done``, so it is sent again when the open
+    response ends, at most once per response end. The server answers it at
+    once, or holds it for the caller's turn.
     """
     answered = False
+    refused = False
     while True:
         call = await calls.get()
+        if call == "refused":
+            refused = True
+            continue
         if isinstance(call, str):
-            if call == "completed" and answered:
+            if (call == "completed" and answered) or refused:
                 await rsn_ws.send(json.dumps({"type": "response.create"}))
-            answered = False
+            answered = refused = False
             continue
         args = json.loads(call["arguments"])
         # Every vendor client blocks, so each runs on a worker thread; one at
