@@ -40,9 +40,12 @@ playback. Nothing dials in.
   mentions it only if asked. Once Prism is idle, a nudge reports the result
   (`request_reply(tool_call=...)`), as Rime's guide says. It is skipped when a
   newer round is open, or when Prism has answered the caller since the result
-  went in. In the smoke runs, an unreported result left a verified caller in
-  silence until they hung up. A nudge sent before the newer round closed made
-  the caller hear the same answer twice.
+  went in. Prism takes a nudge only once it is idle, so a report or a
+  still-working line still waiting is withdrawn if Prism starts answering the
+  caller first. In the smoke runs, an unreported result left a verified caller
+  in silence until they hung up, and a nudge Prism took after starting to
+  answer the caller closed the round that answer opened, so the caller heard
+  the same answer twice.
 
 ## Running it
 

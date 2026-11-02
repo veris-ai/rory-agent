@@ -42,6 +42,8 @@ class FakeSession:
         self.log: list[tuple] = []
         self.rounds: agent.ToolRounds | None = None
         self.before_continue: list = []  # events that arrive after the results went in
+        self.idle = asyncio.Event()  # Prism takes a nudge only once it is idle
+        self.idle.set()
 
     async def submit_tool_result(self, call, output):
         self.log.append(("result", call.call_id, json.loads(output)))
@@ -55,6 +57,7 @@ class FakeSession:
         self.rounds.notice(_started(f"{parent.response_id}_cont", "tools"))
 
     async def request_reply(self, *, instruction=None, tool_call=None):
+        await self.idle.wait()
         if tool_call is None:
             self.log.append(("line", instruction))
             return
@@ -249,3 +252,71 @@ def test_a_fast_lookup_gets_no_line(monkeypatch):
     session = FakeSession()
     _run([_call("resp_1", "call_a"), _ended("resp_1"), InputReady()], session, monkeypatch, lookup_s=0.05)
     assert _kinds(session) == [("result", "call_a"), ("continue", "resp_1")]
+
+
+def _drive(session, steps, monkeypatch, lookup_s: float = 0.0):
+    """Run the loop through ``steps``: events to notice, or seconds to let it run."""
+
+    def fake_dispatch(_session, name, args):
+        time.sleep(lookup_s)
+        return {"tool": name, "ok": True}
+
+    monkeypatch.setattr(agent, "dispatch", fake_dispatch)
+
+    async def go():
+        rounds = agent.ToolRounds(session, object())
+        session.rounds = rounds
+        loop = asyncio.create_task(rounds.run())
+        for step in steps:
+            if isinstance(step, float):
+                await asyncio.sleep(step)
+            elif step == "idle":
+                session.idle.set()
+            else:
+                rounds.notice(step)
+        await asyncio.sleep(0.05)
+        loop.cancel()
+        await asyncio.gather(loop, return_exceptions=True)
+
+    asyncio.run(go())
+
+
+def test_a_held_report_is_withdrawn_when_prism_answers_the_caller(monkeypatch):
+    """Smoke 3's case: the report waited for Prism to be idle, the caller said "okay",
+    and Prism's answer made a new call. Taken after that, the report closed the new
+    round, and the caller heard the result again."""
+    session = FakeSession(refuse={"resp_1": RimeInputError("the caller spoke first")})
+    session.idle.clear()
+    _drive(session, [
+        _call("resp_1", "call_a", "create_payment_arrangement"),
+        _ended("resp_1"),
+        InputReady(),
+        0.05,  # the report waits for Prism to be idle
+        _started("resp_2", "speech"),
+        _call("resp_2", "call_b", "get_payment_arrangement"),
+        _ended("resp_2"),
+        "idle",
+        InputReady(),
+    ], monkeypatch)
+    assert _kinds(session) == [
+        ("result", "call_a"),
+        ("continue", "resp_1"),
+        ("result", "call_b"),
+        ("continue", "resp_2"),
+    ]
+
+
+def test_a_held_still_working_line_is_withdrawn_when_prism_answers_the_caller(monkeypatch):
+    monkeypatch.setattr(agent, "STILL_WORKING_WAITS_S", (0.02, 10.0))
+    session = FakeSession()
+    session.idle.clear()
+    _drive(session, [
+        _call("resp_1", "call_pay", "create_payment_arrangement"),
+        0.1,  # the line waits for Prism to be idle
+        _started("resp_2", "speech"),
+        "idle",
+        0.3,
+        _ended("resp_1"),
+    ], monkeypatch, lookup_s=0.3)
+    assert ("line", agent.STILL_WORKING) not in _kinds(session)
+    assert _kinds(session) == [("result", "call_pay"), ("continue", "resp_1")]

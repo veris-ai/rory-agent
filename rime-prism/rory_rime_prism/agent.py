@@ -216,9 +216,12 @@ class ToolRounds:
     closed it. Prism keeps the result but mentions it only if asked, so the caller
     would sit in silence. Once Prism is idle with no newer round open, a nudge
     reports the result, unless Prism has already answered the caller since the
-    result went in. Nudging any sooner closes the round a newer reply has opened,
-    and the caller hears answers twice. A call that has run has acted, so it is
-    never run again here.
+    result went in. A nudge closes any open round, so one taken after Prism has
+    started answering the caller closes the round that answer opened, and the
+    caller hears answers twice. Prism takes a nudge only once it is idle, so every
+    nudge (a report or a still-working line) is withdrawn if Prism starts
+    answering the caller first. A call that has run has acted, so it is never run
+    again here.
     """
 
     def __init__(self, session: RealtimeSession, call_session: CallSession) -> None:
@@ -230,11 +233,14 @@ class ToolRounds:
         # the answer count when that result went in.
         self._open: dict[str, tuple[ToolCallRef, int]] = {}
         self._unreported: tuple[ToolCallRef, int] | None = None
+        self._nudges: set[asyncio.Task] = set()  # nudges waiting for Prism to be idle
 
     def notice(self, payload: object) -> None:
         """Take one session event, inline in the runner's events loop."""
         if isinstance(payload, ResponseStarted) and payload.cause in ANSWERING_CAUSES:
             self._answers += 1
+            for nudge in self._nudges:
+                nudge.cancel()
         elif isinstance(payload, (ToolCall, ResponseEnded, InputReady)):
             self._events.put_nowait(payload)
 
@@ -250,7 +256,7 @@ class ToolRounds:
                 await self._report()
 
     async def _run_call(self, call: ToolCall) -> None:
-        lines = asyncio.create_task(_say_still_working(self._session))
+        lines = asyncio.create_task(self._say_still_working())
         try:
             result = await asyncio.to_thread(dispatch, self._call_session, call.name, dict(call.arguments))
         finally:
@@ -276,24 +282,41 @@ class ToolRounds:
         if self._answers > answers_then:
             logger.info(f"[prism] result of {call.call_id} not reported: Prism has answered since")
             return
-        try:
-            await self._session.request_reply(tool_call=call)
-        except (RimeRealtimeError, RealtimeAdmissionTimeout) as exc:
-            # The caller spoke first, and Prism answers them with the result in its history.
-            logger.info(f"[prism] result of {call.call_id} not reported: {exc}")
-            return
-        logger.info(f"[prism] reported the result of {call.call_id}")
+        if await self._nudge(tool_call=call):
+            logger.info(f"[prism] reported the result of {call.call_id}")
 
+    async def _say_still_working(self) -> None:
+        """Fill a slow lookup with short lines. The first one closes the tool round."""
+        for wait in STILL_WORKING_WAITS_S:
+            await asyncio.sleep(wait)
+            if not await self._nudge(instruction=STILL_WORKING):
+                return
+            logger.info("[prism] said a still-working line")
 
-async def _say_still_working(session: RealtimeSession) -> None:
-    """Fill a slow lookup with short lines. The first one closes the tool round."""
-    for wait in STILL_WORKING_WAITS_S:
-        await asyncio.sleep(wait)
+    async def _nudge(self, **request) -> bool:
+        """Ask Prism for a reply once it is idle. True when the reply started.
+
+        False when the caller spoke first (Prism answers them with every result in
+        its history), the wait ran out, or Prism started answering the caller
+        before it took the nudge, which withdraws it.
+        """
+        nudge = asyncio.ensure_future(self._session.request_reply(**request))
+        self._nudges.add(nudge)
         try:
-            await session.request_reply(instruction=STILL_WORKING)
-        except (RimeRealtimeError, RealtimeAdmissionTimeout):
-            return  # The caller spoke first, or the wait ran out.
-        logger.info("[prism] said a still-working line")
+            await asyncio.wait([nudge])
+        finally:
+            self._nudges.discard(nudge)
+            nudge.cancel()
+        if nudge.cancelled():
+            logger.info(f"[prism] nudge withdrawn, Prism is answering the caller: {request}")
+            return False
+        error = nudge.exception()
+        if isinstance(error, (RimeRealtimeError, RealtimeAdmissionTimeout)):
+            logger.info(f"[prism] nudge refused: {error}")
+            return False
+        if error is not None:
+            raise error
+        return True
 
 
 async def _continue(session: RealtimeSession, ended: ResponseEnded) -> bool:
