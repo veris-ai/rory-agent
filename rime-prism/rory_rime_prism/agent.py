@@ -210,7 +210,7 @@ class ToolRounds:
     A round can close before it uses its results: the caller spoke first (even an
     "okay"), the reply that made the calls was cancelled, or a still-working line
     closed it. Prism keeps the results but mentions them only if asked, so the
-    caller would sit in silence. When no other round is open, a nudge reports the
+    caller would sit in silence. When no newer round is open, a nudge reports the
     round's result that went in last, unless Prism has already answered the caller
     since. An answer that had said nothing yet when the result went in counts as
     answering since: Prism can still put the result in it. A nudge closes any
@@ -298,7 +298,10 @@ class ToolRounds:
                 logger.info(f"[prism] round of {response_id} dropped: the reply was {ended.status}")
             elif await _continue(self._session, ended):
                 return
-            if len(self._rounds) == 1:
+            # A newer round continues with every result in the history. An older one
+            # still waiting on its calls cannot continue after this reply, so it
+            # does not count.
+            if next(reversed(self._rounds)) == response_id:
                 # The calls finish in any order; the result that went in last has
                 # the highest answer count, and an answer after it came after all.
                 await self._report(*max(results, key=lambda result: result[1]))

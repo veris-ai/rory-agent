@@ -4,7 +4,7 @@ The parity tests check the declared surface. These drive the tool loop: each cal
 runs on its own task through the dispatcher as Prism makes it (writes one at a
 time), each result is submitted, and the reply that made the calls is continued
 once all of them are in. A round that closes before it uses its results is
-reported with a nudge, unless another round is open or Prism has answered the
+reported with a nudge, unless a newer round is open or Prism has answered the
 caller since (an answer that had said nothing when the result went in counts).
 A nudge still waiting is withdrawn when Prism starts answering the
 caller. No call is ever run twice.
@@ -464,3 +464,23 @@ def test_a_round_whose_calls_finish_out_of_order_reports_the_result_that_went_in
         _ended("resp_2"),
     ], monkeypatch, slow={"call_slow": 0.2})
     assert _kinds(session)[-1] == ("report", "call_slow")
+
+
+def test_an_older_round_still_running_does_not_hold_back_a_newer_report(monkeypatch):
+    """The caller barges in on a slow lookup, and Prism's answer makes a fast call
+    whose round the caller also closes. The older round cannot continue after the
+    newer reply, so it does not cover the newer result: each is reported."""
+    session = FakeSession(refuse={"resp_2": RimeInputError("the caller spoke first")})
+    _drive(session, [
+        _call("resp_1", "call_slow", "get_account"),
+        _ended("resp_1", status="cancelled"),
+        _call("resp_2", "call_fast", "get_payment_arrangement"),
+        _ended("resp_2"),
+    ], monkeypatch, slow={"call_slow": 0.3})
+    assert _kinds(session) == [
+        ("result", "call_fast"),
+        ("continue", "resp_2"),
+        ("report", "call_fast"),
+        ("result", "call_slow"),
+        ("report", "call_slow"),
+    ]
