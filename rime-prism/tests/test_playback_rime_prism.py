@@ -95,3 +95,35 @@ def test_replies_play_in_the_order_they_were_opened():
     sent = asyncio.run(go())
     half = 100 * agent.PCM16_BYTES_PER_MS
     assert sent == b"\x01" * half + b"\x02" * half
+
+
+class GatedActor(FakeActor):
+    """An actor whose socket holds each send until the gate opens."""
+
+    def __init__(self):
+        super().__init__()
+        self.gate = asyncio.Event()
+
+    async def send_bytes(self, data: bytes):
+        await self.gate.wait()
+        self.sent.append(data)
+
+
+def test_a_slice_on_its_way_to_the_actor_when_interrupted_counts_as_heard():
+    async def go():
+        actor = GatedActor()
+        playback = agent.ActorPlayback(actor)
+        ref = _ref("resp_1")
+        out = playback.open(ref)
+        out.write(_audio(1000))
+        await asyncio.sleep(0.05)  # the first slice is on its way
+        playback.interrupt([ref])
+        actor.gate.set()
+        played = await asyncio.wait_for(out.completion(), timeout=1)
+        await asyncio.sleep(0.05)
+        await playback.stop()
+        return played, sum(len(piece) for piece in actor.sent)
+
+    played, sent = asyncio.run(go())
+    assert sent == agent.PLAYBACK_SLICE_BYTES
+    assert played == sent / agent.PCM16_BYTES_PER_MS

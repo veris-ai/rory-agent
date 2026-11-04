@@ -479,8 +479,9 @@ class ActorPlayback:
             if stream.buffer:
                 piece = bytes(stream.buffer[:PLAYBACK_SLICE_BYTES])
                 del stream.buffer[:PLAYBACK_SLICE_BYTES]
-                await self._ws.send_bytes(piece)
+                # Counted before the send: an interruption meanwhile cannot recall it.
                 stream.sent_bytes += len(piece)
+                await self._ws.send_bytes(piece)
                 now = loop.time()
                 self._plays_until = max(now, self._plays_until) + len(piece) / (PCM16_BYTES_PER_MS * 1000)
                 ahead = self._plays_until - now
