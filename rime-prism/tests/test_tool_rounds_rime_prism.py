@@ -5,7 +5,8 @@ runs on its own task through the dispatcher as Prism makes it (writes one at a
 time), each result is submitted, and the reply that made the calls is continued
 once all of them are in. A round that closes before it uses its results is
 reported with a nudge, unless another round is open or Prism has answered the
-caller since. A nudge still waiting is withdrawn when Prism starts answering the
+caller since (an answer that had said nothing when the result went in counts).
+A nudge still waiting is withdrawn when Prism starts answering the
 caller. No call is ever run twice.
 """
 
@@ -19,6 +20,8 @@ import time
 import pytest
 from rimelabs_sdk import RimeInputError
 from rimelabs_sdk.realtime import (
+    MessageStarted,
+    OutputRef,
     RealtimeFault,
     ResponseEnded,
     ResponseRef,
@@ -79,6 +82,12 @@ def _ended(response_id: str, status: str = "completed") -> ResponseEnded:
 
 def _started(response_id: str, cause: str) -> ResponseStarted:
     return ResponseStarted(response=ResponseRef(session_id="sess", response_id=response_id), cause=cause)
+
+
+def _message(response_id: str) -> MessageStarted:
+    """The reply's first spoken output."""
+    ref = ResponseRef(session_id="sess", response_id=response_id)
+    return MessageStarted(output=OutputRef(response=ref, item_id=f"msg_{response_id}", output_index=0, content_index=0))
 
 
 def _superseded(code: str = "tool_continuation_unavailable") -> RimeRealtimeError:
@@ -237,17 +246,49 @@ def test_no_report_when_prism_answered_the_caller_after_the_result(monkeypatch):
     assert _kinds(session) == [("result", "call_a"), ("continue", "resp_1")]
 
 
-def test_an_answer_that_started_before_the_result_still_gets_the_report(monkeypatch):
-    """Prism answered the caller before a write's result was in, so the answer could
-    not use it, and the report still goes out."""
+def test_an_answer_that_spoke_before_the_result_still_gets_the_report(monkeypatch):
+    """Prism was already answering the caller out loud when a write's result went in,
+    so the answer could not use it, and the report still goes out."""
     session = FakeSession(refuse={"resp_1": RimeInputError("the caller spoke first")})
     _drive(session, [
         _call("resp_1", "call_pay", "create_payment_arrangement"),
         _ended("resp_1"),
         _started("resp_2", "speech"),
+        _message("resp_2"),
+        0.1,  # the result goes in while the answer plays
         _ended("resp_2"),
     ], monkeypatch, lookup_s=0.05)
     assert _kinds(session)[-1] == ("report", "call_pay")
+
+
+def test_no_report_when_the_result_went_in_before_the_answer_said_anything(monkeypatch):
+    """The caller barges in on the reply that made a write; Prism starts answering
+    them, and the write's result goes in before that answer says a word. The answer
+    uses the result, so a report would make the caller hear it twice."""
+    session = FakeSession()
+    _drive(session, [
+        _started("resp_1", "speech"),
+        _call("resp_1", "call_pay", "modify_payment_arrangement"),
+        _ended("resp_1", status="cancelled"),
+        _started("resp_2", "speech"),
+        0.1,  # the result goes in before the answer says anything
+        _message("resp_2"),
+        _ended("resp_2"),
+    ], monkeypatch, lookup_s=0.05)
+    assert _kinds(session) == [("result", "call_pay")]
+
+
+def test_the_reply_that_made_the_call_has_already_spoken(monkeypatch):
+    """The call is that reply's output, so its prompt was fixed before the result.
+    A result that goes in while it still runs is reported when it is cancelled."""
+    session = FakeSession()
+    _drive(session, [
+        _started("resp_1", "speech"),
+        _call("resp_1", "call_a", "verify_caller"),
+        0.1,  # the result goes in while the reply still runs
+        _ended("resp_1", status="cancelled"),
+    ], monkeypatch)
+    assert _kinds(session) == [("result", "call_a"), ("report", "call_a")]
 
 
 @pytest.mark.parametrize("code", sorted(agent.SUPERSEDED_CODES))

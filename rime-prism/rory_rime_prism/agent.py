@@ -34,6 +34,7 @@ from rimelabs_sdk.realtime import (
     AudioChunk,
     FaultEvent,
     ItemTruncated,
+    MessageStarted,
     OutputRef,
     PCMFormat,
     RealtimeAdmissionTimeout,
@@ -214,9 +215,11 @@ class ToolRounds:
     closed it. Prism keeps the results but mentions them only if asked, so the
     caller would sit in silence. When no other round is open, a nudge reports the
     round's last result, unless Prism has already answered the caller since that
-    result went in. A nudge closes any open round, so one taken after Prism has
-    started answering the caller closes the round that answer opened, and the
-    caller hears answers twice. Prism takes a nudge only once it is idle, so every
+    result went in. An answer that had said nothing yet when the result went in
+    counts as answering since: Prism can still put the result in it. A nudge
+    closes any open round, so one taken after Prism has started answering the
+    caller closes the round that answer opened, and the caller hears answers
+    twice. Prism takes a nudge only once it is idle, so every
     nudge (a report or a still-working line) is withdrawn if Prism starts
     answering the caller first. A call that has run has acted, so it is never run
     again here.
@@ -227,6 +230,7 @@ class ToolRounds:
         self._call_session = call_session
         self._events: asyncio.Queue[ToolCall | ResponseEnded] = asyncio.Queue()
         self._answers = 0  # replies so far that answered with the whole history
+        self._unspoken: str | None = None  # the answer that has started but said nothing yet
         self._rounds: dict[str, list[asyncio.Task]] = {}  # each open round's calls
         self._writes = asyncio.Lock()
         self._nudges: set[asyncio.Task] = set()  # nudges waiting for Prism to be idle
@@ -235,10 +239,22 @@ class ToolRounds:
         """Take one session event, inline in the runner's events loop."""
         if isinstance(payload, ResponseStarted) and payload.cause in ANSWERING_CAUSES:
             self._answers += 1
+            self._unspoken = payload.response.response_id
             for nudge in self._nudges:
                 nudge.cancel()
-        elif isinstance(payload, (ToolCall, ResponseEnded)):
+        elif isinstance(payload, MessageStarted):
+            self._spoke(payload.output.response.response_id)
+        elif isinstance(payload, ToolCall):
+            self._spoke(payload.call.response_id)
             self._events.put_nowait(payload)
+        elif isinstance(payload, ResponseEnded):
+            self._spoke(payload.response.response_id)
+            self._events.put_nowait(payload)
+
+    def _spoke(self, response_id: str) -> None:
+        """A reply's first output (or its end) means its prompt is fixed."""
+        if self._unspoken == response_id:
+            self._unspoken = None
 
     async def run(self) -> None:
         async with asyncio.TaskGroup() as tasks:
@@ -262,8 +278,11 @@ class ToolRounds:
         finally:
             lines.cancel()
         logger.info(f"[prism] tool {call.name} ({call.call.call_id}) -> {json.dumps(result)}")
+        # The submit returns once Prism has the result, and the runner has seen every
+        # event before that. An answer still silent then can use the result, so it
+        # counts as answering after it.
         await self._session.submit_tool_result(call.call, json.dumps(result))
-        return call.call, self._answers
+        return call.call, self._answers - (self._unspoken is not None)
 
     async def _dispatch(self, call: ToolCall) -> dict:
         return await asyncio.to_thread(dispatch, self._call_session, call.name, dict(call.arguments))
