@@ -269,7 +269,7 @@ class ToolRounds:
                     tasks.create_task(self._finish_round(payload))
 
     async def _run_call(self, call: ToolCall) -> tuple[ToolCallRef, int]:
-        """Run one call and submit its result. Returns the call and the answer count then."""
+        """Run one call and submit its result. Returns the call and the answers before it went in."""
         lines = asyncio.create_task(self._say_still_working())
         try:
             if call.name in WRITE_TOOLS:
@@ -280,11 +280,12 @@ class ToolRounds:
         finally:
             lines.cancel()
         logger.info(f"[prism] tool {call.name} ({call.call.call_id}) -> {json.dumps(result)}")
-        # The submit returns once Prism has the result, and the runner has seen every
-        # event before that. An answer still silent then can use the result, so it
-        # counts as answering after it.
+        # An answer that has said nothing when the result is sent can still use it,
+        # so it counts as answering after it. Its first words may arrive while the
+        # result is on its way in, and which came first on Prism's side is unknown.
+        answers_then = self._answers - (self._unspoken is not None)
         await self._session.submit_tool_result(call.call, json.dumps(result))
-        return call.call, self._answers - (self._unspoken is not None)
+        return call.call, answers_then
 
     async def _dispatch(self, call: ToolCall) -> dict:
         return await asyncio.to_thread(dispatch, self._call_session, call.name, dict(call.arguments))

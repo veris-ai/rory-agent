@@ -48,10 +48,13 @@ class FakeSession:
         self.log: list[tuple] = []
         self.rounds: agent.ToolRounds | None = None
         self.before_continue: list = []  # events that arrive after the results went in
+        self.during_submit: list = []  # events that arrive while a result is on its way in
         self.idle = asyncio.Event()  # Prism takes a nudge only once it is idle
         self.idle.set()
 
     async def submit_tool_result(self, call, output):
+        while self.during_submit:
+            self.rounds.notice(self.during_submit.pop(0))
         self.log.append(("result", call.call_id, json.loads(output)))
 
     async def continue_reply(self, parent):
@@ -501,3 +504,17 @@ def test_no_still_working_line_once_prism_has_answered_the_caller(monkeypatch):
         _ended("resp_2"),
     ], monkeypatch, lookup_s=0.3)
     assert _kinds(session) == [("result", "call_pay"), ("continue", "resp_1")]
+
+
+def test_an_answer_whose_first_words_arrive_while_the_result_goes_in_counts_as_using_it(monkeypatch):
+    """Which came first on Prism's side, the result or the answer's first words, is
+    unknown, so the answer counts as having used the result."""
+    session = FakeSession()
+    session.during_submit = [_message("resp_2")]
+    _drive(session, [
+        _started("resp_1", "speech"),
+        _call("resp_1", "call_pay", "modify_payment_arrangement"),
+        _ended("resp_1", status="cancelled"),
+        _started("resp_2", "speech"),
+    ], monkeypatch, lookup_s=0.05)
+    assert _kinds(session) == [("result", "call_pay")]
