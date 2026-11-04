@@ -484,3 +484,20 @@ def test_an_older_round_still_running_does_not_hold_back_a_newer_report(monkeypa
         ("result", "call_slow"),
         ("report", "call_slow"),
     ]
+
+
+def test_no_still_working_line_once_prism_has_answered_the_caller(monkeypatch):
+    """Prism answers the caller while a slow write's first line is still counting
+    down. The caller is not waiting in silence, and a line taken now would close
+    any round that answer opened."""
+    monkeypatch.setattr(agent, "STILL_WORKING_WAITS_S", (0.1, 10.0))
+    session = FakeSession()
+    _drive(session, [
+        _call("resp_1", "call_pay", "create_payment_arrangement"),
+        _ended("resp_1"),
+        0.03,
+        _started("resp_2", "speech"),
+        _message("resp_2"),
+        _ended("resp_2"),
+    ], monkeypatch, lookup_s=0.3)
+    assert _kinds(session) == [("result", "call_pay"), ("continue", "resp_1")]

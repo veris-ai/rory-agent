@@ -316,10 +316,16 @@ class ToolRounds:
             logger.info(f"[prism] reported the result of {call.call_id}")
 
     async def _say_still_working(self) -> None:
-        """Fill a slow lookup with short lines. The first one closes the tool round."""
+        """Fill a slow lookup with short lines. The first one closes the tool round.
+
+        Once Prism has answered the caller, the caller is no longer waiting in
+        silence, and a line would close any round that answer opened, so the lines
+        stop.
+        """
+        answers = self._answers
         for wait in STILL_WORKING_WAITS_S:
             await asyncio.sleep(wait)
-            if not await self._nudge(instruction=STILL_WORKING):
+            if self._answers > answers or not await self._nudge(instruction=STILL_WORKING):
                 return
             logger.info("[prism] said a still-working line")
 
