@@ -102,7 +102,11 @@ async def run_voice_ws_bot(actor_ws: WebSocket) -> None:
         event = json.loads(await rsn_ws.recv())
         if event["type"] != "session.updated":
             raise RuntimeError(f"Dialog-RSN-1 refused the session: {event}")
-        logger.info(f"[voice] Dialog-RSN-1 session ready: {len(TOOLS)} tools, voice={RSN_VOICE}")
+        # PolyAI's id for the session, the key their engineers look calls up by.
+        logger.info(
+            f"[voice] Dialog-RSN-1 session ready: {len(TOOLS)} tools, voice={RSN_VOICE}, "
+            f"poly_session_id={event['session']['poly_session_id']}"
+        )
 
         # Agent speaks first. The shared prompt says the greeting already
         # happened, so this one response is told to say it.

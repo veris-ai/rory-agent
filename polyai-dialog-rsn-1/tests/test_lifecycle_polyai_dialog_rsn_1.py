@@ -169,7 +169,9 @@ def test_call_bridges_a_real_local_websocket(monkeypatch):
         update = json.loads(await socket.recv())
         assert update["type"] == "session.update"
         assert update["session"]["tools"] == agent.TOOLS
-        await socket.send(json.dumps({"type": "session.updated"}))
+        await socket.send(json.dumps({
+            "type": "session.updated", "session": {"poly_session_id": "conversation_test"},
+        }))
         greeting = json.loads(await socket.recv())
         assert greeting["type"] == "response.create"
         assert GREETING in greeting["response"]["instructions"]
