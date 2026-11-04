@@ -26,8 +26,8 @@ playback. Nothing dials in.
   interrupted reply.
 - **Greeting.** Prism has no welcome message. A nudge (`request_reply`) asks it
   to say the shared greeting. Prism generates the audio, so it can paraphrase.
-  Like any nudge it is withdrawn if Prism starts answering the caller first, and
-  tool calls run while it waits.
+  Tool calls run while it waits, and Prism refuses it if the caller speaks
+  first.
 - **Tools.** Each tool is a `ToolDefinition` built from the shared schema, with
   no `prism_filler` set, so Prism says its own short phrase ("One moment.")
   while a tool runs. As in Rime's tools guide, each call starts on its own task
@@ -37,23 +37,16 @@ playback. Nothing dials in.
   extensions, paperless) run one at a time, because Prism can ask for the same
   write again while the first is still running, and the shared tools refuse
   the repeat only once the first has finished. No call is ever run again.
-- **Slow tools.** A lookup still running after 4 s gets a nudge for one short
-  "still working" line, and another 10 s later, as in Rime's slow-tool guide.
-  The lines stop once Prism has answered the caller.
-- **Results of closed rounds.** A round can close before it uses its result:
-  the caller spoke first (even an "okay"), the reply that made the call was
-  cancelled, or a still-working line closed it. Prism keeps the result but
-  mentions it only if asked, so without a report the caller hears silence
-  after the tool's phrase. A nudge reports the result
-  (`request_reply(tool_call=...)`), as Rime's guide says. It is skipped when a
-  newer round is open, or when Prism has answered the caller since the result
-  went in. An answer that had said nothing yet when the result went in counts:
-  Prism can still put the result in it. When a round made several calls, the
-  result that went in last decides. A nudge closes any open round, so one taken after Prism has started
-  answering the caller closes the round that answer opened, and the caller
-  hears the same answer twice. Prism takes a nudge only once it is idle, so a
-  report or a still-working line still waiting is withdrawn if Prism starts
-  answering the caller first.
+- **Slow tools.** As in Rime's slow-tool guide, a lookup still running after
+  4 s gets a nudge for one short "still working" line, and another 10 s later.
+  The lines stop if Prism refuses one. At 30 s the lookup gets an error result.
+- **Results of closed rounds.** As in Rime's guide to late results, when
+  Prism refuses to continue a round (the caller spoke first, a still-working
+  line closed it, or a wait ran out), a nudge reports each of its results
+  (`request_reply(tool_call=...)`). Prism keeps a result but mentions it only
+  if asked, so without the report the caller hears silence after the tool's
+  phrase. A round whose reply did not complete is dropped, as in Rime's tools
+  guide.
 
 ## Running it
 
