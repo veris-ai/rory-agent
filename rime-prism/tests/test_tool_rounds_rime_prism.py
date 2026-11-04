@@ -96,10 +96,13 @@ def _superseded(code: str = "tool_continuation_unavailable") -> RimeRealtimeErro
 
 
 class FakeDispatch:
-    """The shared dispatcher, recording which calls ran and how many at once."""
+    """The shared dispatcher, recording which calls ran and how many at once.
 
-    def __init__(self, lookup_s: float) -> None:
+    Each call takes ``lookup_s``, or its own time in ``slow`` (by call id)."""
+
+    def __init__(self, lookup_s: float, slow: dict[str, float] | None = None) -> None:
         self.lookup_s = lookup_s
+        self.slow = slow or {}
         self.ran: list[str] = []
         self.running: dict[str, int] = {"write": 0, "read": 0}
         self.most: dict[str, int] = {"write": 0, "read": 0}
@@ -111,16 +114,16 @@ class FakeDispatch:
             self.ran.append(args["n"])
             self.running[kind] += 1
             self.most[kind] = max(self.most[kind], self.running[kind])
-        time.sleep(self.lookup_s)
+        time.sleep(self.slow.get(args["n"], self.lookup_s))
         with self._lock:
             self.running[kind] -= 1
         return {"tool": name, "ok": True}
 
 
-def _drive(session, steps, monkeypatch, lookup_s: float = 0.0) -> FakeDispatch:
+def _drive(session, steps, monkeypatch, lookup_s: float = 0.0, slow: dict[str, float] | None = None) -> FakeDispatch:
     """Run the loop through ``steps``: events to notice, seconds to let it run, or
     "idle" to let Prism take nudges. Then wait for every open round to finish."""
-    fake = FakeDispatch(lookup_s)
+    fake = FakeDispatch(lookup_s, slow)
     monkeypatch.setattr(agent, "dispatch", fake)
 
     async def go():
@@ -444,3 +447,20 @@ def test_a_greeting_whose_wait_runs_out_leaves_the_call_running(monkeypatch):
     session = OpeningTimesOut()
     assert _run_control(session, [0.02, _call("resp_1", "call_a"), _ended("resp_1"), 0.1], monkeypatch)
     assert _kinds(session) == [("result", "call_a"), ("continue", "resp_1")]
+
+
+def test_a_round_whose_calls_finish_out_of_order_reports_the_result_that_went_in_last(monkeypatch):
+    """Prism makes a slow call, then a fast one. The fast result goes in, Prism
+    answers the caller with it, and then the slow result goes in. That answer could
+    not have used the slow result, so it is reported."""
+    session = FakeSession(refuse={"resp_1": RimeInputError("the caller spoke first")})
+    _drive(session, [
+        _call("resp_1", "call_slow", "get_account"),
+        _call("resp_1", "call_fast", "get_payment_arrangement"),
+        _ended("resp_1"),
+        0.05,  # the fast result goes in
+        _started("resp_2", "speech"),
+        _message("resp_2"),
+        _ended("resp_2"),
+    ], monkeypatch, slow={"call_slow": 0.2})
+    assert _kinds(session)[-1] == ("report", "call_slow")

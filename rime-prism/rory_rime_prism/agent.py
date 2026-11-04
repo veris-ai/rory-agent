@@ -211,15 +211,14 @@ class ToolRounds:
     "okay"), the reply that made the calls was cancelled, or a still-working line
     closed it. Prism keeps the results but mentions them only if asked, so the
     caller would sit in silence. When no other round is open, a nudge reports the
-    round's last result, unless Prism has already answered the caller since that
-    result went in. An answer that had said nothing yet when the result went in
-    counts as answering since: Prism can still put the result in it. A nudge
-    closes any open round, so one taken after Prism has started answering the
-    caller closes the round that answer opened, and the caller hears answers
-    twice. Prism takes a nudge only once it is idle, so every
-    nudge (a report or a still-working line) is withdrawn if Prism starts
-    answering the caller first. A call that has run has acted, so it is never run
-    again here.
+    round's result that went in last, unless Prism has already answered the caller
+    since. An answer that had said nothing yet when the result went in counts as
+    answering since: Prism can still put the result in it. A nudge closes any
+    open round, so one taken after Prism has started answering the caller closes
+    the round that answer opened, and the caller hears answers twice. Prism takes
+    a nudge only once it is idle, so every nudge (a report or a still-working
+    line) is withdrawn if Prism starts answering the caller first. A call that has
+    run has acted, so it is never run again here.
     """
 
     def __init__(self, session: RealtimeSession, call_session: CallSession) -> None:
@@ -300,7 +299,9 @@ class ToolRounds:
             elif await _continue(self._session, ended):
                 return
             if len(self._rounds) == 1:
-                await self._report(*results[-1])
+                # The calls finish in any order; the result that went in last has
+                # the highest answer count, and an answer after it came after all.
+                await self._report(*max(results, key=lambda result: result[1]))
         finally:
             del self._rounds[response_id]
 
