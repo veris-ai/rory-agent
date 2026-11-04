@@ -142,7 +142,7 @@ async def run_voice_ws_bot(actor_ws: WebSocket) -> None:
                 ),
                 name="conversation",
             )
-            control = asyncio.create_task(_control(session, rounds), name="control")
+            control = asyncio.create_task(_control(rounds), name="control")
             tasks = [conversation, control]
             try:
                 done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -191,14 +191,11 @@ def _on_event(event: SessionEvent, rounds: ToolRounds) -> None:
         )
 
 
-async def _control(session: RealtimeSession, rounds: ToolRounds) -> None:
-    """Speak the greeting, then run every tool round for the rest of the call."""
-    try:
-        await session.request_reply(instruction=GREETING_INSTRUCTION)
-    except RimeRealtimeError as exc:
-        # The caller spoke first; Prism answers them instead.
-        logger.info(f"[prism] greeting skipped: {exc}")
-    await rounds.run()
+async def _control(rounds: ToolRounds) -> None:
+    """Run every tool round for the rest of the call, greeting the caller meanwhile."""
+    async with asyncio.TaskGroup() as tasks:
+        tasks.create_task(rounds.run())
+        await rounds.greet()
 
 
 class ToolRounds:
@@ -234,6 +231,12 @@ class ToolRounds:
         self._rounds: dict[str, list[asyncio.Task]] = {}  # each open round's calls
         self._writes = asyncio.Lock()
         self._nudges: set[asyncio.Task] = set()  # nudges waiting for Prism to be idle
+
+    async def greet(self) -> None:
+        """Prism has no welcome message, so a nudge opens the call. Like any nudge,
+        it is withdrawn if Prism starts answering the caller first."""
+        if await self._nudge(instruction=GREETING_INSTRUCTION):
+            logger.info("[prism] greeted the caller")
 
     def notice(self, payload: object) -> None:
         """Take one session event, inline in the runner's events loop."""

@@ -22,6 +22,7 @@ from rimelabs_sdk import RimeInputError
 from rimelabs_sdk.realtime import (
     MessageStarted,
     OutputRef,
+    RealtimeAdmissionTimeout,
     RealtimeFault,
     ResponseEnded,
     ResponseRef,
@@ -382,3 +383,64 @@ def test_a_held_still_working_line_is_withdrawn_when_prism_answers_the_caller(mo
     ], monkeypatch, lookup_s=0.3)
     assert ("line", agent.STILL_WORKING) not in _kinds(session)
     assert _kinds(session) == [("result", "call_pay"), ("continue", "resp_1")]
+
+
+def _run_control(session, steps, monkeypatch) -> bool:
+    """Run the whole control task, greeting and tool rounds, through ``steps`` (as in
+    ``_drive``). Returns whether the call was still running at the end."""
+    monkeypatch.setattr(agent, "dispatch", FakeDispatch(0.0))
+
+    async def go():
+        rounds = agent.ToolRounds(session, object())
+        session.rounds = rounds
+        control = asyncio.create_task(agent._control(rounds))
+        for step in steps:
+            if isinstance(step, float):
+                await asyncio.sleep(step)
+            elif step == "idle":
+                session.idle.set()
+            else:
+                rounds.notice(step)
+        await asyncio.sleep(0.05)
+        running = not control.done()
+        control.cancel()
+        await asyncio.gather(control, return_exceptions=True)
+        return running
+
+    return asyncio.run(go())
+
+
+def test_the_greeting_opens_the_call(monkeypatch):
+    session = FakeSession()
+    assert _run_control(session, [0.02], monkeypatch)
+    assert session.log == [("line", agent.GREETING_INSTRUCTION)]
+
+
+def test_the_caller_speaking_first_withdraws_the_greeting_and_tools_run_meanwhile(monkeypatch):
+    """The greeting waits for Prism to be idle while Prism answers the caller with a
+    call. The call runs without waiting for the greeting, and the answer withdraws
+    it, so it does not play after the answer."""
+    session = FakeSession()
+    session.idle.clear()
+    assert _run_control(session, [
+        0.02,
+        _started("resp_1", "speech"),
+        _call("resp_1", "call_a", "verify_caller"),
+        _ended("resp_1"),
+        0.1,
+        "idle",
+    ], monkeypatch)
+    assert _kinds(session) == [("result", "call_a"), ("continue", "resp_1")]
+
+
+def test_a_greeting_whose_wait_runs_out_leaves_the_call_running(monkeypatch):
+    """The caller talks over the opening until Prism's readiness wait runs out. The
+    SDK keeps the session usable, and so does the call."""
+
+    class OpeningTimesOut(FakeSession):
+        async def request_reply(self, **request):
+            raise RealtimeAdmissionTimeout("readiness expired")
+
+    session = OpeningTimesOut()
+    assert _run_control(session, [0.02, _call("resp_1", "call_a"), _ended("resp_1"), 0.1], monkeypatch)
+    assert _kinds(session) == [("result", "call_a"), ("continue", "resp_1")]
