@@ -6,10 +6,17 @@ websocket endpoint:
 
     wss://api.smallest.ai/atoms/v1/agent/connect
 
-Like Hydra, Grok Voice and Gemini Live, Atoms *is* the whole voice loop — one
-speech-to-speech session, no STT/LLM/TTS pipeline to assemble here, and
-turn-taking and barge-in are owned server-side. What this module adds is the
-``voice_ws`` bridging, the per-call ``CallSession``, and the hop onto a
+Unlike Hydra, Grok Voice or Gemini Live, Atoms is not necessarily one
+speech-to-speech model under the hood — it is a platform, and the agent
+behind ``ATOMS_AGENT_ID`` may be running a cascaded STT/LLM/TTS pipeline
+Atoms assembles internally (the agent-settings docs expose an STT model as
+an agent setting, and the speech-settings docs call out that Voice
+Detection/Smart Turn Detection are hidden specifically for "realtime models
+... which handle audio end to end" — implying most agents are not that).
+This bridge does not need to know or care which: the wire protocol over
+``/agent/connect`` is one audio-in/audio-out websocket either way, turn-taking
+and barge-in are owned server-side regardless, and what this module adds is
+the ``voice_ws`` bridging, the per-call ``CallSession``, and the hop onto a
 worker thread for the blocking vendor calls, the same shape every other
 speech-to-speech candidate in this repo uses.
 
