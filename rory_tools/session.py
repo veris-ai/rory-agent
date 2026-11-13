@@ -13,6 +13,7 @@ import os
 
 import stripe
 
+from .harness import HarnessState
 from .services import FineractClient, StripeClient
 from .services.fineract_client import FineractError
 from .services.stripe_client import StripeError
@@ -64,6 +65,11 @@ class CallSession:
         self.account: Dict[str, Any] | None = None
         self.fineract_client_id: int | None = None
         self.failed_attempts = 0
+        # Harness v2's call-history state (rory_tools.harness) — read-back
+        # preconditions and the no-repeated-change check. Transport-neutral
+        # like the rest of this class: it only knows what tools were called
+        # and with what arguments, never which voice stack carried the call.
+        self.harness = HarnessState()
 
     @property
     def customer_id(self) -> str:

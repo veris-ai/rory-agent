@@ -15,7 +15,7 @@ from starlette.websockets import WebSocketDisconnect
 from websockets.asyncio.server import serve
 
 from rory_dialt import agent
-from rory_tools import SCHEMAS
+from rory_tools import SCHEMAS, impl
 from rory_tools.prompt import GREETING, load_agent_prompt, today_context
 
 READY = {
@@ -525,7 +525,8 @@ def test_committed_write_errors_are_unknown_not_failed(monkeypatch, failure):
     from rory_tools.session import clients
 
     account = {"customer_id": "cus_fixture", "name": "Jane Smith",
-               "mailing_address": {"postal_code": "60614"}, "email": "jane@example.invalid"}
+               "mailing_address": {"postal_code": "60614"}, "email": "jane@example.invalid",
+               "paperless": False, "supplier": "Acme Energy", "income_fpl_pct": None}
     committed = []
 
     def write(_customer, updates):
@@ -543,10 +544,19 @@ def test_committed_write_errors_are_unknown_not_failed(monkeypatch, failure):
         find_customer_by_account_number=lambda _: account,
         list_payment_methods=lambda _: [], list_bills=lambda *_args, **_kwargs: [],
         set_customer_metadata=write, get_customer=refresh,
+        # Harness v2's read-back precondition requires get_account before a
+        # write like set_paperless_billing — see rory_tools/harness.py.
+        arrears=lambda _: {"arrears_cents": 0, "days_past_due": 0},
+        list_service_agreements=lambda _: [],
     ))
     monkeypatch.setattr(clients, "_fineract", SimpleNamespace(
         find_client_by_account_number=lambda _: {"client_id": 1},
     ))
+    # This fixture's account is minimal (it exists to test write-error
+    # handling, not get_account's own field set — see test_ownership_and_terms.py
+    # for that). get_account only needs to run so harness v2's read-back
+    # precondition for set_paperless_billing is satisfied.
+    monkeypatch.setitem(impl.IMPLEMENTATIONS, "get_account", lambda _s, _a: {"ok": True})
 
     async def scenario():
         async def peer(ws):
@@ -563,6 +573,11 @@ def test_committed_write_errors_are_unknown_not_failed(monkeypatch, failure):
                                 "args": {"account_number": "4417-88231", "name_on_account": "Jane Smith", "second_factor": postal}})
                 result = await receive_json(ws)
                 assert result["outcome"] == expected
+            # Harness v2 holds set_paperless_billing until get_account has
+            # been fetched this call — the realistic path any agent follows.
+            await send(ws, {"type": "tool_call", "id": "account", "name": "get_account", "args": {}})
+            account_result = await receive_json(ws)
+            assert account_result["outcome"] == "succeeded"
             await send(ws, {"type": "tool_call", "id": "write", "name": "set_paperless_billing", "args": {"enabled": True}})
             result = await receive_json(ws)
             assert committed == [{"paperless": True}]

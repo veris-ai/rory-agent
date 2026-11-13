@@ -1,9 +1,10 @@
 """Run one tool call, the same way for every transport.
 
 This is the whole shared contract between an agent and the world: gate the call
-on verification, run the implementation, turn a vendor refusal into words the
-model has to relay, and return the result to the transport. Bench captures model/tool messages
-through its injected OpenTelemetry instrumentation.
+on verification, run the harness, run the implementation, turn a vendor
+refusal into words the model has to relay, and return the result to the
+transport. Bench captures model/tool messages through its injected
+OpenTelemetry instrumentation.
 
 It is deliberately synchronous. Every vendor client is blocking, and each
 transport knows how to keep its own event loop free (they hop this onto a
@@ -17,6 +18,7 @@ from typing import Any, Dict
 
 from loguru import logger
 
+from . import harness
 from .impl import IMPLEMENTATIONS, UNGATED, UNVERIFIED
 from .session import CallSession, VENDOR_ERRORS
 
@@ -40,6 +42,11 @@ def dispatch(session: CallSession, name: str, args: Dict[str, Any]) -> Dict[str,
         logger.warning(f"tool {name} refused: caller not verified")
         return dict(UNVERIFIED)
 
+    blocked = harness.check(session, name, args)
+    if blocked is not None:
+        logger.warning(f"tool {name} blocked by harness: {blocked['error']}")
+        return blocked
+
     try:
         result = fn(session, args)
     except VENDOR_ERRORS as exc:
@@ -48,4 +55,5 @@ def dispatch(session: CallSession, name: str, args: Dict[str, Any]) -> Dict[str,
         logger.exception(f"tool {name} failed")
         result = {"error": f"that lookup failed: {exc}"}
 
+    harness.record(session, name, args, result)
     return result
