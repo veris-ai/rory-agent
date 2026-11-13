@@ -51,12 +51,11 @@ onto it (console, or the agent's versioned draft → publish → activate flow �
 
 1. **Prompt and greeting** — `rory_tools/agent_desc.txt` as the global
    prompt, `rory_tools.prompt.GREETING` as the first message.
-2. **Tools, as client tools, not API tools.** Run
+2. **Tools, as client tools, not API tools** — see `rory_atoms/tools.py`'s
+   module docstring for why that distinction matters. Run
    `python -m rory_atoms.tools` from this package to print the exact 16
-   definitions (name, description, parameters, wait-for-response, timeout).
-   Registering them as Atoms "API tools" instead would have Atoms call them
-   directly over HTTP, bypassing `rory_tools.dispatch` — and the harness
-   below — entirely, silently grading a different, ungated agent.
+   definitions to push (name, description, parameters, wait-for-response,
+   timeout).
 3. **Turn-taking settings**, on the agent's Speech tab — mapped from a
    benchmark report's turn-taking-settings findings (the same report this
    transport implements the harness side of):

@@ -1,6 +1,6 @@
-"""Harness v2 — the rule layer ported from the VAmoS Pro benchmark's R5v2 arm.
+"""Harness v2 — see ``rory_tools.harness`` for what each rule checks and why.
 
-Exercises ``rory_tools.harness`` directly (no vendor clients involved: the
+Exercises it directly (no vendor clients involved: the
 rules only read call history and arguments) plus one pass through
 ``dispatch`` itself, to pin that the gate actually runs before the tool
 implementation — not just that the rule functions are correct in isolation.

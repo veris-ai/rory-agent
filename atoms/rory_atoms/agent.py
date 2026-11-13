@@ -18,31 +18,23 @@ way, turn-taking and barge-in are owned server-side regardless, and what
 this module adds is the ``voice_ws`` bridging, the per-call ``CallSession``,
 and the hop onto a worker thread for the blocking vendor calls.
 
-Two things about this wire protocol matter for how this module is built,
-confirmed against Smallest's public docs (the WebSocket SDK page, the
-Realtime Agent WebSocket API reference, and the client-tools page — none of
-it undocumented or guessed):
+There is no per-connection session configuration at all — prompt, greeting,
+voice and turn-taking settings all live on the Atoms agent itself, not sent
+here; see the README's "Required agent configuration" for exactly what to
+push and why this repo cannot script that push. ``AGENT_PROMPT``/``GREETING``
+below are imported only so this transport asserts the same parity contract
+as every other candidate (``rory_tools.parity.assert_shares_prompt_and_greeting``);
+they are read, never transmitted.
 
-1. There is no per-connection session configuration at all. The prompt,
-   greeting, voice, and turn-taking settings (silence/release timing, "smart
-   turn detection" — Atoms' equivalent of the benchmark's MaAI) all live on
-   the Atoms AGENT, set once through the console or the agent's versioned
-   config, not sent here. ``AGENT_PROMPT``/``GREETING`` below are still
-   imported from the shared module so this transport asserts the same parity
-   contract as every other candidate (``rory_tools.parity.assert_shares_prompt_and_greeting``),
-   but they are read, not transmitted — a human has to push them into the
-   agent itself. See the README for the exact values to set and why this
-   repo cannot script that push.
-2. Tool calls only reach this pod if Rory's 16 tools are registered as
-   Atoms **client tools** (not server-side "API tools", which Atoms would
-   call directly over HTTP, bypassing ``rory_tools.dispatch`` — and this
-   repo's harness — entirely). ``rory_atoms.tools.provisioning_payload()``
-   is the exact definition to push for each one.
+Likewise, tool calls only reach this pod if Rory's 16 tools are registered
+as Atoms client tools rather than server-side API tools — see
+``rory_atoms.tools``'s module docstring for why that distinction matters.
+``rory_atoms.tools.provisioning_payload()`` is the exact definition to push
+for each one.
 
-Sample-rate note: the Veris actor speaks and listens at 24 kHz PCM16, and
-Atoms' connection accepts an explicit ``input_audio_format``/
-``output_audio_format`` query parameter rather than negotiating one, so both
-legs are opened at ``pcm_24000`` and no resampling runs in either direction.
+The Veris actor speaks and listens at 24 kHz PCM16; both legs of this
+connection are opened at ``pcm_24000`` too (see the README's "The wire"),
+so no resampling runs in either direction.
 """
 
 from __future__ import annotations
@@ -180,11 +172,8 @@ async def _pump_atoms_to_actor(
 ) -> None:
     """Atoms events -> audio bytes back to the actor; dispatch tool calls.
 
-    No response needs to be explicitly resumed after a tool call: Atoms'
-    documented client message list has no message for that at all, and the
-    client-tools doc describes nothing the app sends beyond
-    ``function_call.result`` — the agent is expected to continue on its own
-    once it has the result.
+    Nothing is sent to resume a response after a tool call — see the
+    README's "The wire" for why there's no such message to send.
     """
     n_audio_frames = 0
     n_audio_bytes = 0

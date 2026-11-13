@@ -18,22 +18,13 @@ regardless of which settings or model carried the audio.
 
 What the benchmark's harness v2 found did NOT port cleanly, and why:
 
-- "holds a transfer until the caller has heard their shutoff protections" —
-  no transport here gives the harness a transcript, so "heard" cannot be
-  checked. What CAN be checked is the mechanical
-  precondition for the agent to be ABLE to say it: that ``get_account``, which
-  carries ``protections``/``in_shutoff_process``, was actually fetched this
-  call. See :data:`READ_BACK_PRECONDITIONS` applied to ``transfer_to_human``
-  in :func:`check`.
-- "wants a read-back and a yes for each account change" — same gap: no
-  transcript means no way to confirm a spoken "yes". What this enforces
-  instead is that the read tool whose entire job is to carry the terms back
-  (``quote_payment_arrangement`` before ``create_payment_arrangement``, etc.)
-  was actually called first, with the SAME terms where the schema has a
-  matching field (installments). This is a strictly weaker guarantee than
-  "the caller said yes" — the benchmark's own report flags the same gap,
-  noting its harness's rules were written from a read of its own failures
-  rather than tested independently of them.
+- "holds a transfer until the caller has heard their shutoff protections" and
+  "wants a read-back and a yes for each account change" — both assume a
+  transcript to check "heard"/"said yes" against, and no transport here has
+  one. Both are instead enforced as a mechanical precondition on prior tool
+  calls — a strictly weaker guarantee. See the ``transfer_to_human`` branch
+  in :func:`check` for the first, and :func:`record` for the second
+  (including how a refused quote is handled).
 - "removes the first harness's wrong blocks" — nothing to remove; Rory has no
   prior harness to carry mistakes forward from.
 - the benchmark's old-harness appendix also described a "G3 justified
@@ -146,11 +137,8 @@ def check(session: "CallSession", name: str, args: Dict[str, Any]) -> Optional[D
             }
 
         if name == "create_payment_arrangement" and h.last_arrangement_quote_installments is not None:
-            # Only enforced once a quote has actually succeeded with a
-            # specific installment count to hold the model to — a quote that
-            # was itself refused (no down payment/monthly amount exists to
-            # mismatch) leaves this to create_payment_arrangement's own
-            # policy check, which re-derives and refuses independently.
+            # Only set when a quote actually succeeded — see record()'s
+            # docstring for why a refused quote skips this check instead.
             installments = args.get("installments")
             if h.last_arrangement_quote_installments != installments:
                 return {
