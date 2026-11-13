@@ -58,10 +58,9 @@ onto it (console, or the agent's versioned draft → publish → activate flow �
    Registering them as Atoms "API tools" instead would have Atoms call them
    directly over HTTP, bypassing `rory_tools.dispatch` — and the harness
    below — entirely, silently grading a different, ungated agent.
-3. **Turn-taking settings**, on the agent's Speech tab — mapped from the
-   VAmoS Pro benchmark report this transport implements the harness side of
-   (`R1 settings` / `MaAI`, Atoms rises from 71 to 131 of 160 calls, 11 Nov
-   2026):
+3. **Turn-taking settings**, on the agent's Speech tab — mapped from a
+   benchmark report's turn-taking-settings findings (the same report this
+   transport implements the harness side of):
    | Benchmark setting | Atoms field | Suggested value |
    |---|---|---|
    | 0.6–0.8 s silence before taking the turn | **Release time** | 0.6–0.8 s (repo's existing cross-transport parity target) |
@@ -86,14 +85,14 @@ documents one.
 ## The harness
 
 `rory_tools/harness.py` (shared — applies to every transport in this repo,
-not only this one) ports the benchmark's harness v2 finding: a rule layer
-between a tool call and its execution was the single largest lever measured
-(+18.8 points over turn-taking settings and MaAI combined). It is wired into
-`rory_tools.dispatch`, so it runs here exactly as it does for every other
-candidate. See that module's docstring for exactly which of the benchmark's
-four harness-v2 rules ported as-is, which had to be weakened because no
-transport in this repo (this one included) exposes a transcript to check
-against, and which don't apply to Rory's actual 16 tools at all.
+not only this one) ports a benchmark finding: a rule layer between a tool
+call and its execution was the largest lever measured on Atoms, ahead of
+turn-taking settings and MaAI. It is wired into `rory_tools.dispatch`, so it
+runs here exactly as it does for every other candidate. See that module's
+docstring for exactly which of the benchmark's four harness-v2 rules ported
+as-is, which had to be weakened because no transport in this repo (this one
+included) exposes a transcript to check against, and which don't apply to
+Rory's actual 16 tools at all.
 
 ## Running it
 

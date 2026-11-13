@@ -1,16 +1,14 @@
 """Harness v2: a rule layer between a tool call and its execution.
 
-Ported from Veris's VAmoS Pro benchmark (11 Nov 2026, "Atoms rises from 71 to
-131 of 160 calls"). The benchmark ran Atoms against the same 160 simulated
-billing calls under eight settings, and found that a harness — a rule layer
-sitting between the model's tool calls and their execution — was the single
-largest lever on these tasks: +18.8 points over turn-taking settings and MaAI
-combined. Its own description of that layer is the contract this module
-keeps: "it never calls a model and never changes the prompt or the tool
-list." Every rule below is a deterministic check against this call's own tool
-history, re-derived from what each rule had to mean given Rory's actual 16
-tools, since the benchmark's harness was written against a private task list
-this repo does not have.
+Ported from a benchmark finding that a harness sitting between the model's
+tool calls and their execution was the largest lever measured on Atoms —
+bigger than turn-taking settings and MaAI combined. Its own description of
+that layer is the contract this module keeps: "it never calls a model and
+never changes the prompt or the tool list." Every rule below is a
+deterministic check against this call's own tool history, re-derived from
+what each rule had to mean given Rory's actual 16 tools, since the
+benchmark's harness was written against a private task list this repo does
+not have.
 
 Wired into every transport at once, from :mod:`rory_tools.dispatch` — the one
 seam already shared byte-for-byte by every candidate, so this is not an
@@ -32,10 +30,10 @@ What the benchmark's harness v2 found did NOT port cleanly, and why:
   instead is that the read tool whose entire job is to carry the terms back
   (``quote_payment_arrangement`` before ``create_payment_arrangement``, etc.)
   was actually called first, with the SAME terms where the schema has a
-  matching field (installments). This is a strictly weaker guarantee than the
-  benchmark's own number assumes, which is itself an answer to the report's
-  own caveat that harness v2's rules "were written from R5's own failures on
-  these tasks, so these 160 calls overstate it."
+  matching field (installments). This is a strictly weaker guarantee than
+  "the caller said yes" — the benchmark's own report flags the same gap,
+  noting its harness's rules were written from a read of its own failures
+  rather than tested independently of them.
 - "removes the first harness's wrong blocks" — nothing to remove; Rory has no
   prior harness to carry mistakes forward from.
 - the benchmark's old-harness appendix also described a "G3 justified
