@@ -12,10 +12,11 @@ is registered as a **client tool** on the Atoms agent itself (console, or
 the agent's versioned config), not as a server-side "API tool" — an API tool
 is one Atoms calls directly over HTTP, which would bypass ``rory_tools``'s
 verification gate and harness entirely and silently grade a different,
-ungated agent. ``provisioning_payload()`` below is the exact shape to push for
-each tool; there is no endpoint in Atoms' public API reference for setting an
-agent's tools programmatically as of this writing, so pushing it is a manual
-step — see the README.
+ungated agent. ``provisioning_payload()`` below is the exact shape to push
+for each tool; confirmed against the live API (not just absent docs) that
+there is no field for setting it programmatically — every shape tried on the
+agent's draft endpoint was rejected — so pushing it is a manual console
+step. See the README for exactly what was tried.
 """
 
 from __future__ import annotations

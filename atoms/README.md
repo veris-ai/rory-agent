@@ -45,40 +45,49 @@ Realtime Agent WebSocket API reference, and the client-tools page):
 
 ## Required agent configuration
 
-Before pointing `ATOMS_AGENT_ID` at a real agent, push all of the following
-onto it (console, or the agent's versioned draft → publish → activate flow —
-**not** the legacy `PATCH /workflow/{workflowId}`, which bypasses versioning):
+Before pointing `ATOMS_AGENT_ID` at a real agent, it needs all of the
+following. Two of the three are scriptable — confirmed against the live API,
+not just docs:
 
-1. **Prompt and greeting** — `rory_tools/agent_desc.txt` as the global
-   prompt, `rory_tools.prompt.GREETING` as the first message.
-2. **Tools, as client tools, not API tools** — see `rory_atoms/tools.py`'s
-   module docstring for why that distinction matters. Run
-   `python -m rory_atoms.tools` from this package to print the exact 16
-   definitions to push (name, description, parameters, wait-for-response,
-   timeout).
-3. **Turn-taking settings**, on the agent's Speech tab — mapped from a
-   benchmark report's turn-taking-settings findings (the same report this
-   transport implements the harness side of):
-   | Benchmark setting | Atoms field | Suggested value |
+```bash
+SMALLEST_API_KEY=... uv run python -m atoms.scripts.provision_agent
+```
+
+This creates an agent (or reuses one via `--agent-id`), forks a branch, and
+pushes prompt, greeting, and turn-taking settings through
+`PUT /agent/{id}/branches/{branchId}/draft` — then publishes and activates
+it. It prints the resulting id to use as `ATOMS_AGENT_ID`.
+
+1. **Prompt and greeting** — `rory_tools/agent_desc.txt` as `globalPrompt`,
+   `rory_tools.prompt.GREETING` as `firstMessage`. Scripted.
+2. **Turn-taking settings** — mapped from a benchmark report's
+   turn-taking-settings findings (the same report this transport implements
+   the harness side of). Scripted, via the `voiceDetectionConfig`/
+   `smartTurnConfig`/`sttMissDetectorConfig` fields `GET /agent/{id}` already
+   shows on every agent:
+   | Benchmark setting | Atoms field | Value this script pushes |
    |---|---|---|
-   | 0.6–0.8 s silence before taking the turn | **Release time** | 0.6–0.8 s (repo's existing cross-transport parity target) |
-   | MaAI (a model decides whose turn it is) | **Smart turn detection** | On |
-   | Noise robustness | **Voice detection: Confidence** | tune up from the Standard default (0.7) against your own noise conditions |
-   | R2's "I can't hear you" hang-up | **Handle unrecognised speech** | On |
+   | 0.6–0.8 s silence before taking the turn | `voiceDetectionConfig.releaseTimeInSecs` | 0.7 (default is 0.2) |
+   | MaAI (a model decides whose turn it is) | `smartTurnConfig.isEnabled` | `true` (already the default) |
+   | R2's "I can't hear you" hang-up | `sttMissDetectorConfig.isEnabled` | `true` (already the default) |
 
    Two of the benchmark's R1 findings have **no matching Atoms field** as of
    this writing and are not configurable from here: barge-in requiring
    transcribed words rather than audio alone, and an "addressee gate" that
    drops speech not directed at the agent (e.g. a TV in the background).
-   `Allow interruptions` / `Interruption backoff timer` are the nearest
-   levers but do not reproduce either one. Flag this as a known gap rather
-   than silently dropping it.
-
-There is no public, documented REST field for pushing 2 or 3
-programmatically as of this writing (the versioning-lifecycle docs show
-`globalPrompt`/`firstMessage`/`synthesizer`/`language`, not a `tools` or
-speech-settings field) — this is a manual console step until Smallest
-documents one.
+   `allowInterruptions` / `interruptionBackoffTimer` are the nearest levers
+   but do not reproduce either one. Flag this as a known gap rather than
+   silently dropping it.
+3. **Tools, as client tools, not API tools** — confirmed NOT scriptable: a
+   `tools` field on the draft (and every other shape tried —
+   `workflowTools`, nested under `workflow`, a guessed
+   `.../draft/workflow` route) was rejected with `{"status": false,
+   "errors": ["No recognized config fields in request body"]}` or 404'd. See
+   `rory_atoms/tools.py`'s module docstring for why client tools matter (not
+   API tools). In the console's Tools tab, paste the output of:
+   ```bash
+   uv run python -m rory_atoms.tools
+   ```
 
 ## The harness
 
@@ -123,3 +132,7 @@ closed at boot without `SMALLEST_API_KEY` or `ATOMS_AGENT_ID`.
 `test_pumps_atoms.py` scripts the receive loop directly: tool-call dispatch
 and reply, a truncated-arguments call skipped rather than dispatched, audio
 bridging, a non-fatal `interruption`, and a fatal `error` event.
+
+`scripts/provision_agent.py` is a dev tool, not part of the image — it needs
+a real `SMALLEST_API_KEY` and talks to the live Atoms API, so it isn't run
+by the test suite.
