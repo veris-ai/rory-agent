@@ -6,24 +6,22 @@ websocket endpoint:
 
     wss://api.smallest.ai/atoms/v1/agent/connect
 
-Unlike Hydra, Grok Voice or Gemini Live, Atoms is not necessarily one
-speech-to-speech model under the hood — it is a platform, and the agent
-behind ``ATOMS_AGENT_ID`` may be running a cascaded STT/LLM/TTS pipeline
-Atoms assembles internally (the agent-settings docs expose an STT model as
-an agent setting, and the speech-settings docs call out that Voice
-Detection/Smart Turn Detection are hidden specifically for "realtime models
-... which handle audio end to end" — implying most agents are not that).
-This bridge does not need to know or care which: the wire protocol over
-``/agent/connect`` is one audio-in/audio-out websocket either way, turn-taking
-and barge-in are owned server-side regardless, and what this module adds is
-the ``voice_ws`` bridging, the per-call ``CallSession``, and the hop onto a
-worker thread for the blocking vendor calls, the same shape every other
-speech-to-speech candidate in this repo uses.
+Atoms is a platform, not necessarily one speech-to-speech model under the
+hood: the agent behind ``ATOMS_AGENT_ID`` may be running a cascaded
+STT/LLM/TTS pipeline Atoms assembles internally (the agent-settings docs
+expose an STT model as an agent setting, and the speech-settings docs call
+out that Voice Detection/Smart Turn Detection are hidden specifically for
+"realtime models ... which handle audio end to end" — implying most agents
+are not that). This bridge does not need to know or care which: the wire
+protocol over ``/agent/connect`` is one audio-in/audio-out websocket either
+way, turn-taking and barge-in are owned server-side regardless, and what
+this module adds is the ``voice_ws`` bridging, the per-call ``CallSession``,
+and the hop onto a worker thread for the blocking vendor calls.
 
-Two things make Atoms unlike every other candidate here, confirmed against
-Smallest's public docs (the WebSocket SDK page, the Realtime Agent WebSocket
-API reference, and the client-tools page — none of it undocumented or
-guessed):
+Two things about this wire protocol matter for how this module is built,
+confirmed against Smallest's public docs (the WebSocket SDK page, the
+Realtime Agent WebSocket API reference, and the client-tools page — none of
+it undocumented or guessed):
 
 1. There is no per-connection session configuration at all. The prompt,
    greeting, voice, and turn-taking settings (silence/release timing, "smart
@@ -44,9 +42,7 @@ guessed):
 Sample-rate note: the Veris actor speaks and listens at 24 kHz PCM16, and
 Atoms' connection accepts an explicit ``input_audio_format``/
 ``output_audio_format`` query parameter rather than negotiating one, so both
-legs are opened at ``pcm_24000`` and no resampling runs in either direction —
-unlike Hydra, whose input leg is pinned at 16 kHz regardless of what is asked
-for.
+legs are opened at ``pcm_24000`` and no resampling runs in either direction.
 """
 
 from __future__ import annotations
@@ -171,7 +167,7 @@ async def _pump_actor_to_atoms(actor_ws: WebSocket, atoms_ws) -> None:
     except KeyError as exc:
         # Starlette raises KeyError('bytes') when it got a text frame instead
         # of a binary one — a protocol mismatch on the actor side, not a bug
-        # here (the same defensive case Hydra's pump handles).
+        # here.
         logger.error(
             f"[a->at] non-binary frame after {n_frames} binary frames — "
             f"actor protocol mismatch? ({exc})"
@@ -184,11 +180,11 @@ async def _pump_atoms_to_actor(
 ) -> None:
     """Atoms events -> audio bytes back to the actor; dispatch tool calls.
 
-    No response needs to be explicitly resumed after a tool call the way
-    Hydra's ``response.create`` does: Atoms' documented client message list
-    has no such message at all, and the client-tools doc describes nothing
-    the app sends beyond ``function_call.result`` — the agent is expected to
-    continue on its own once it has the result.
+    No response needs to be explicitly resumed after a tool call: Atoms'
+    documented client message list has no message for that at all, and the
+    client-tools doc describes nothing the app sends beyond
+    ``function_call.result`` — the agent is expected to continue on its own
+    once it has the result.
     """
     n_audio_frames = 0
     n_audio_bytes = 0
@@ -235,12 +231,10 @@ async def _pump_atoms_to_actor(
                 try:
                     args = json.loads(raw_args)
                 except json.JSONDecodeError:
-                    # Not confirmed in Atoms' docs the way Hydra's truncated-
-                    # arguments case is, but the same shape of failure (a
-                    # barge-in cutting generation off mid-argument) is
-                    # possible on any realtime tool-calling wire, so the same
-                    # defensive handling applies: a call that never finished
-                    # streaming is not dispatched.
+                    # Not confirmed anywhere in Atoms' docs, but a barge-in
+                    # cutting generation off mid-argument is possible on any
+                    # realtime tool-calling wire: defensively, a call whose
+                    # arguments never finished streaming is not dispatched.
                     logger.warning(
                         f"[at->a] tool {name} ({call_id}) arguments truncated — "
                         f"not dispatched: {raw_args!r}"

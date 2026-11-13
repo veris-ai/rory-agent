@@ -1,10 +1,9 @@
 """The Atoms<->actor bridge, exercised against a fake websocket.
 
-Atoms' client-tools docs don't document a truncated-arguments case the way
-Hydra's OpenAI-Realtime-shaped events do, but the same shape of failure (a
-barge-in cutting generation off mid-argument) is possible on any realtime
-tool-calling wire, so the defensive handling in ``agent.py`` is tested the
-same way Hydra's is.
+Atoms' client-tools docs don't document a truncated-arguments case, but the
+same shape of failure (a barge-in cutting generation off mid-argument) is
+possible on any realtime tool-calling wire, so ``agent.py``'s defensive
+handling for it is tested here directly.
 """
 
 from __future__ import annotations

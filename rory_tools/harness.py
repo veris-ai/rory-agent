@@ -19,8 +19,8 @@ regardless of which settings or model carried the audio.
 What the benchmark's harness v2 found did NOT port cleanly, and why:
 
 - "holds a transfer until the caller has heard their shutoff protections" —
-  no transport here gives the harness a transcript (Hydra has none at all),
-  so "heard" cannot be checked. What CAN be checked is the mechanical
+  no transport here gives the harness a transcript, so "heard" cannot be
+  checked. What CAN be checked is the mechanical
   precondition for the agent to be ABLE to say it: that ``get_account``, which
   carries ``protections``/``in_shutoff_process``, was actually fetched this
   call. See :data:`READ_BACK_PRECONDITIONS` applied to ``transfer_to_human``

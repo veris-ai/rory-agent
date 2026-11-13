@@ -24,11 +24,10 @@ Realtime Agent WebSocket API reference, and the client-tools page):
 
 - Connect with `token`, `agent_id`, `mode=webcall`, and
   `input_audio_format`/`output_audio_format` both pinned to `pcm_24000` — the
-  actor's native rate, so neither leg is resampled (contrast Hydra, whose
-  input leg is pinned at 16 kHz regardless).
+  actor's native rate, so neither leg is resampled.
 - The server's first message is `session.created` directly — there is no
-  `session.configure` step the way Hydra has, because there is nothing left
-  to configure per-connection.
+  configure step to wait on, because there is nothing left to configure
+  per-connection.
 - Audio streams as `input_audio_buffer.append` (client) /
   `output_audio.delta` (server, field `audio`). There is no commit message
   needed in this mode: the docs describe the server as handling VAD and turn
@@ -36,9 +35,9 @@ Realtime Agent WebSocket API reference, and the client-tools page):
 - Tool calls arrive as `function_call` (`name`, `call_id`, `arguments` as a
   JSON string) and are answered with `function_call.result`
   (`call_id`, `output` as a JSON string). There is no response-resume message
-  to send afterward the way Hydra needs `response.create` — Atoms' documented
-  client message list has nothing like it, so the agent is expected to
-  continue on its own once it has the result.
+  to send afterward — Atoms' documented client message list has nothing like
+  it, so the agent is expected to continue on its own once it has the
+  result.
 - `interruption` announces a barge-in; the server owns stopping its own
   generation, so this bridge only stops receiving further
   `output_audio.delta` for that turn — there is nothing documented to send
