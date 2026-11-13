@@ -31,6 +31,10 @@ def verified(monkeypatch):
 ])
 def test_other_customer_bill_is_an_ownership_refusal(verified, tool, args):
     session, stripe, _ = verified
+    # Harness v2's read-back precondition (rory_tools/harness.py) only cares
+    # that the paired read tool was called THIS call, not which bill_id — the
+    # ownership check below is impl.py's, and is what this test is pinning.
+    session.harness.calls_seen |= {"get_account", "get_bill", "list_bills"}
     assert dispatch(session, tool, args) == {"error": "that bill is not on this account"}
     stripe.pay_bill.assert_not_called()
 
@@ -39,6 +43,12 @@ def test_other_customer_bill_is_an_ownership_refusal(verified, tool, args):
 @pytest.mark.parametrize("tool", ["quote_payment_arrangement", "create_payment_arrangement"])
 def test_invalid_term_is_a_policy_refusal_without_vendor_write(verified, tool, term):
     session, _, fineract = verified
+    if tool == "create_payment_arrangement":
+        # Harness v2 requires quote_payment_arrangement to have been called
+        # first; no *successful* quote exists for an invalid term, so this
+        # only satisfies the generic precondition and leaves the specific
+        # refusal to create_payment_arrangement's own policy check below.
+        session.harness.calls_seen.add("quote_payment_arrangement")
     result = dispatch(session, tool, {"installments": term})
     if tool == "quote_payment_arrangement":
         assert result["allowed"] is False

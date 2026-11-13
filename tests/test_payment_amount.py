@@ -13,6 +13,15 @@ def _verified_session():
     return session
 
 
+def _with_account_read(session):
+    """Harness v2 requires get_account before a write like make_payment —
+    see rory_tools/harness.py. These tests exercise make_payment/
+    create_payment_arrangement in isolation, so the read is seeded directly
+    rather than re-run through a second mocked vendor call."""
+    session.harness.calls_seen.add("get_account")
+    return session
+
+
 @pytest.mark.parametrize("amount", [2948, 7000])
 def test_a_different_confirmed_amount_does_not_charge_the_bill(monkeypatch, amount):
     pay = Mock()
@@ -21,7 +30,7 @@ def test_a_different_confirmed_amount_does_not_charge_the_bill(monkeypatch, amou
         pay_bill=pay,
     )))
 
-    result = dispatch(_verified_session(), "make_payment", {
+    result = dispatch(_with_account_read(_verified_session()), "make_payment", {
         "bill_id": "in_bill", "payment_method_id": "pm_card", "amount_cents": amount,
     })
 
@@ -37,7 +46,7 @@ def test_a_confirmed_full_balance_is_charged_and_reported(monkeypatch):
         pay_bill=pay,
     )))
 
-    result = dispatch(_verified_session(), "make_payment", {
+    result = dispatch(_with_account_read(_verified_session()), "make_payment", {
         "bill_id": "in_bill", "payment_method_id": "pm_card", "amount_cents": 6007,
     })
 
@@ -55,6 +64,11 @@ def test_a_plan_requiring_an_uncollected_down_payment_is_not_opened(monkeypatch)
     ))
     session = _verified_session()
     session.account["prior_arrangement_default_on"] = "2026-08-01"
+    # Harness v2 requires a prior quote_payment_arrangement whose installments
+    # match this call's — seeded directly since quote_payment_arrangement's
+    # own vendor calls are out of scope for this test.
+    session.harness.calls_seen.add("quote_payment_arrangement")
+    session.harness.last_arrangement_quote_installments = 2
 
     result = dispatch(session, "create_payment_arrangement", {"installments": 2})
 

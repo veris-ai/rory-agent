@@ -52,6 +52,7 @@ wrong.
 | [`agentcore`](agentcore/) | Amazon Connect's voice stack — Lex for speech-to-text, Bedrock AgentCore Runtime for the model and tool rounds, Polly for speech — a hand-rolled cascade, Rory's tools dispatched locally |
 | [`hydra`](hydra/) | Smallest AI's Hydra speech-to-speech model (`hydra-v1.1`) — one realtime websocket per call, OpenAI-Realtime-shaped tool-call events over its own session handshake, no transcript on the wire |
 | [`rime-prism`](rime-prism/) | Rime Prism speech-to-speech through the Rime Python SDK — one session per call carrying the shared prompt and tools, Prism's own turn-taking, the SDK's conversation runner bridging the actor's audio, Rory's tools dispatched locally |
+| [`atoms`](atoms/) | Smallest AI's Atoms platform over its unified realtime websocket (`wss://api.smallest.ai/atoms/v1/agent/connect`) — one session per call, no per-connection configuration at all (prompt, greeting, turn-taking and tools are provisioned on the agent itself, see `atoms/README.md`), Rory's tools dispatched locally as Atoms client tools |
 
 Each ships as its own image, built from one shared lockfile with
 `uv sync --package`, so a candidate carries only its own voice SDK. Most have
@@ -72,7 +73,8 @@ gemini-live/   Gemini Live transport
 gemini-live-xt-thinking/   Gemini 3.8 Live Extended Thinking (copy of gemini-live)
 openai-realtime/, deepgram/, elevenlabs/, elevenlabs-realtime/, livekit/, mistral/, fluxions/, huggingface/,
 grok-voice/, vapi/, cartesia/, gradium/, polyai/, gpt-live/,
-grok-cascade/, smallest/, dialt/, phonic/, agentcore/, hydra/, rime-prism/  twenty-one more transports, same contract
+grok-cascade/, smallest/, dialt/, phonic/, agentcore/, hydra/, rime-prism/,
+atoms/  twenty-two more transports, same contract
 ```
 
 A transport is expected to use three things — `SCHEMAS`, `CallSession`, and
