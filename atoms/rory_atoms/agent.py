@@ -19,11 +19,11 @@ this module adds is the ``voice_ws`` bridging, the per-call ``CallSession``,
 and the hop onto a worker thread for the blocking vendor calls.
 
 There is no per-connection session configuration at all — prompt, greeting,
-voice and turn-taking settings all live on the Atoms agent itself, not sent
-here; see the README's "Required agent configuration" for exactly what to
-push and why this repo cannot script that push. ``AGENT_PROMPT``/``GREETING``
-below are imported only so this transport asserts the same parity contract
-as every other candidate (``rory_tools.parity.assert_shares_prompt_and_greeting``);
+voice, turn-taking settings and tools all live on the Atoms agent itself, not
+sent here; see ``atoms/scripts/provision_agent.py`` and the README's
+"Required agent configuration". ``AGENT_PROMPT``/``GREETING`` below are
+imported only so this transport asserts the same parity contract as every
+other candidate (``rory_tools.parity.assert_shares_prompt_and_greeting``);
 they are read, never transmitted.
 
 Likewise, tool calls only reach this pod if Rory's 16 tools are registered

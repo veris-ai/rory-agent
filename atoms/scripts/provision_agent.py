@@ -1,23 +1,13 @@
 """Push Rory's entire config onto a real Atoms agent — prompt, greeting,
 turn-taking settings, and the 16 tools.
 
-Confirmed against the live API (not just docs, which don't enumerate a full
-schema): ``PUT /agent/{id}/branches/{branchId}/draft`` accepts the same
-camelCase fields shown on ``GET /agent/{id}`` for the top-level settings
-(``globalPrompt``, ``firstMessage``, ``voiceDetectionConfig``,
-``smartTurnConfig``, ``sttMissDetectorConfig``). Tools took more digging: a
-bare top-level ``tools`` field (or ``workflowTools``, or nested under a plain
-``workflow`` key) is rejected with ``"No recognized config fields in request
-body"``. What actually works is nesting them under a ``singlePromptConfig``
-block alongside the discriminator this agent type needs:
-
-    {"type": "single_prompt", "singlePromptConfig": {"prompt": ..., "tools": [...]}}
-
-— confirmed by watching the draft's ``workflow_tools`` block id actually
-change on acceptance (it's otherwise identical across every rejected
-attempt). See ``rory_atoms/tools.py`` for the per-tool shape and the one
-JSON-Schema constraint (``make_payment.amount_cents``'s ``minimum``) that
-genuinely has nowhere to go in it.
+All of it goes through ``PUT /agent/{id}/branches/{branchId}/draft``: the
+top-level settings (``globalPrompt``, ``firstMessage``,
+``voiceDetectionConfig``, ``smartTurnConfig``, ``sttMissDetectorConfig``) as
+their own fields, and tools nested as ``{"type": "single_prompt",
+"singlePromptConfig": {"prompt": ..., "tools": [...]}}`` — see
+``rory_atoms/tools.py``'s module docstring for why that nesting is required
+and the per-tool shape.
 
 Usage::
 

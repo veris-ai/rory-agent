@@ -4,35 +4,23 @@ The 16 tools, their descriptions, their implementations and the verification
 gate all live in ``rory_tools`` and are shared byte for byte with the other
 transports. This module is only the Atoms-shaped wrapper.
 
-Unlike every other speech-to-speech candidate in this repo, Atoms' realtime
-websocket does not take a ``tools`` array (or any per-connection
-configuration at all — see ``agent.py``'s module docstring). A tool only
-reaches this pod's ``function_call``/``function_call.result`` exchange if it
-is registered as a **client tool** on the Atoms agent itself, not as a
-server-side "API tool" — an API tool is one Atoms calls directly over HTTP,
-which would bypass ``rory_tools``'s verification gate and harness entirely
-and silently grade a different, ungated agent.
+A tool only reaches this pod's ``function_call``/``function_call.result``
+exchange if it is registered as a **client tool** on the Atoms agent — not a
+server-side "API tool", which Atoms would call directly over HTTP, bypassing
+``rory_tools``'s verification gate and harness entirely.
 
-This IS scriptable — confirmed against the live API, not docs (which don't
-enumerate the schema). The shape below is the one a real agent echoed back
-once accepted, pushed through the same
-``PUT /agent/{id}/branches/{branchId}/draft`` endpoint as the prompt and
-turn-taking settings, nested as ``{"type": "single_prompt",
-"singlePromptConfig": {"prompt": ..., "tools": [...]}}``. A bare top-level
-``tools`` field (or ``workflowTools``, or nested under a plain ``workflow``
-key) is rejected with ``"No recognized config fields in request body"`` — the
-``type``/``singlePromptConfig`` wrapper is what makes it land. See
-``atoms/scripts/provision_agent.py``, which pushes this for real.
+Pushed via ``PUT /agent/{id}/branches/{branchId}/draft``, nested as
+``{"type": "single_prompt", "singlePromptConfig": {"prompt": ...,
+"tools": [...]}}`` — see ``atoms/scripts/provision_agent.py``, which pushes
+this for real; confirmed against the live API, not docs (which don't
+enumerate the schema).
 
-The wire shape differs from ``ToolSchema`` in two ways, both load-bearing:
-``type`` must be the literal ``"client_tool"`` (the full discriminator set,
-from a validation error: ``integration_tool | end_call | transfer_call |
-api_call | extract_dynamic_variables | knowledge_base_search |
-send_whatsapp_message | client_tool``), and each parameter's ``type`` is one
-of Atoms' own four (``text | number | boolean | enum``), not JSON Schema's —
-so ``_TYPE_MAP`` translates. Atoms' parameter schema also has no field for a
-JSON Schema constraint like ``minimum`` (``make_payment.amount_cents`` has
-one) — there is nothing to push it into, not an oversight here.
+The wire shape differs from ``ToolSchema`` in two ways: ``type`` must be the
+literal ``"client_tool"``, and each parameter's ``type`` is one of Atoms' own
+four (``text | number | boolean | enum``), not JSON Schema's — ``_TYPE_MAP``
+translates. Atoms' parameter schema also has no field for a JSON Schema
+constraint like ``minimum`` (``make_payment.amount_cents`` has one) — there
+is nothing to push it into.
 """
 
 from __future__ import annotations

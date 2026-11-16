@@ -75,9 +75,9 @@ def test_tool_calls_go_through_the_shared_gate():
 
 
 def test_provisioning_payload_is_what_tool_surface_was_read_from():
-    """The thing a human actually pastes into the agent's Tools tab is the
-    same object the parity check above ran against — not two copies that
-    could quietly drift apart."""
+    """What provision_agent.py actually pushes is the same object the parity
+    check above ran against — not two copies that could quietly drift
+    apart."""
     assert tools.provisioning_payload() is tools.TOOLS
 
 
