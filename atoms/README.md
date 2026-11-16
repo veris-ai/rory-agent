@@ -138,3 +138,29 @@ bridging, a non-fatal `interruption`, and a fatal `error` event.
 `scripts/provision_agent.py` is a dev tool, not part of the image — it needs
 a real `SMALLEST_API_KEY` and talks to the live Atoms API, so it isn't run
 by the test suite.
+
+`tests/live_smoke.py` is an opt-in, billable, end-to-end proof — not part of
+`pytest`, same as `dialt/tests/live_smoke.py`. It boots the real `/voice`
+ASGI app, points it at disposable in-memory Stripe/Fineract fixtures
+(`tests/live_backends.py`), bridges to a real, already-provisioned Atoms
+agent, and drives a full conversation with synthesized speech (Lightning
+TTS): wrong-then-corrected verification, `get_account`, `set_paperless_billing`
+held on a read-back confirmation exactly as the prompt and the harness both
+require, and a declined-then-retried payment. Tool-call evidence comes from
+monkeypatching `rory_atoms.agent.dispatch` to record every call without
+changing its behavior — `/voice` itself carries only raw audio, nothing to
+otherwise observe tool calls in. Confirmed with a real run against a real
+agent: 7 tool calls, all through the shared dispatcher and harness, bridging
+~2 minutes of real audio both directions. Run it with:
+
+```bash
+SMALLEST_API_KEY=... ATOMS_AGENT_ID=... \
+  uv run --no-sync python atoms/tests/live_smoke.py --output /tmp/atoms-live.json
+```
+
+One real gotcha worth knowing if you adapt this script: Atoms streams
+`output_audio.delta` roughly once a second continuously, turn or no turn —
+unlike a vendor that goes quiet between turns, "time since the last audio
+byte" never ages past ~1s here and can't signal a quiet agent. Pacing
+between utterances is a fixed sleep instead; the real gate is waiting for
+the expected tool call to show up.
