@@ -12,8 +12,7 @@ server-side "API tool", which Atoms would call directly over HTTP, bypassing
 Pushed via ``PUT /agent/{id}/branches/{branchId}/draft``, nested as
 ``{"type": "single_prompt", "singlePromptConfig": {"prompt": ...,
 "tools": [...]}}`` — see ``atoms/scripts/provision_agent.py``, which pushes
-this for real; confirmed against the live API, not docs (which don't
-enumerate the schema).
+this for real.
 
 The wire shape differs from ``ToolSchema`` in two ways: ``type`` must be the
 literal ``"client_tool"``, and each parameter's ``type`` is one of Atoms' own

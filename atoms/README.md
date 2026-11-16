@@ -46,8 +46,7 @@ Realtime Agent WebSocket API reference, and the client-tools page):
 ## Required agent configuration
 
 Before pointing `ATOMS_AGENT_ID` at a real agent, it needs the following —
-all of it scriptable, confirmed by actually running this against a live
-agent rather than from docs (which don't enumerate the full schema):
+all of it scriptable:
 
 ```bash
 SMALLEST_API_KEY=... uv run python -m atoms.scripts.provision_agent
