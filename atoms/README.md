@@ -150,8 +150,5 @@ SMALLEST_API_KEY=... ATOMS_AGENT_ID=... \
   uv run --no-sync python atoms/tests/live_smoke.py --output /tmp/atoms-live.json
 ```
 
-Worth knowing if you adapt this script: Atoms streams `output_audio.delta`
-continuously, turn or no turn, so "time since the last audio byte" can't
-signal a quiet agent the way it can for a vendor that goes silent between
-turns. Pacing between utterances is a fixed sleep instead; the real gate is
-waiting for the expected tool call to show up.
+See `Evidence`'s docstring in that file for why it paces with a fixed sleep
+instead of a silence-gap heuristic.
