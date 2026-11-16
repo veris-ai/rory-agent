@@ -6,17 +6,17 @@ websocket endpoint:
 
     wss://api.smallest.ai/atoms/v1/agent/connect
 
-Atoms is a platform, not necessarily one speech-to-speech model under the
-hood: the agent behind ``ATOMS_AGENT_ID`` may be running a cascaded
-STT/LLM/TTS pipeline Atoms assembles internally (the agent-settings docs
-expose an STT model as an agent setting, and the speech-settings docs call
-out that Voice Detection/Smart Turn Detection are hidden specifically for
-"realtime models ... which handle audio end to end" — implying most agents
-are not that). This bridge does not need to know or care which: the wire
-protocol over ``/agent/connect`` is one audio-in/audio-out websocket either
-way, turn-taking and barge-in are owned server-side regardless, and what
-this module adds is the ``voice_ws`` bridging, the per-call ``CallSession``,
-and the hop onto a worker thread for the blocking vendor calls.
+Atoms is a platform, not one speech-to-speech model under the hood: the
+agent behind ``ATOMS_AGENT_ID`` runs a cascaded STT/LLM/TTS pipeline Atoms
+assembles internally (the agent-settings docs expose an STT model as an
+agent setting, and the speech-settings docs hide Voice Detection/Smart Turn
+Detection specifically for "realtime models ... which handle audio end to
+end" — the exception, not this agent). This bridge does not need to know or
+care: the wire protocol over ``/agent/connect`` is one audio-in/audio-out
+websocket either way, turn-taking and barge-in are owned server-side
+regardless, and what this module adds is the ``voice_ws`` bridging, the
+per-call ``CallSession``, and the hop onto a worker thread for the blocking
+vendor calls.
 
 There is no per-connection session configuration at all — prompt, greeting,
 voice, turn-taking settings and tools all live on the Atoms agent itself, not
