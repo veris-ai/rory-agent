@@ -12,10 +12,10 @@ result back on the same socket. Nothing dials in.
 > [!IMPORTANT]
 > Unlike every other speech-to-speech candidate in this repo, Atoms takes
 > **no configuration at all on the connection**. The prompt, greeting, voice,
-> and turn-taking settings live on the Atoms agent itself. This pod cannot
-> provision that for you — see **Required agent configuration** below before
-> the first call will behave correctly, and before scoring this candidate
-> against anything.
+> turn-taking settings, and tools all live on the Atoms agent itself — run
+> `atoms/scripts/provision_agent.py` (see **Required agent configuration**
+> below) before pointing `ATOMS_AGENT_ID` at it, or every call will run
+> against an agent with no tools at all.
 
 ## The wire
 
@@ -45,26 +45,26 @@ Realtime Agent WebSocket API reference, and the client-tools page):
 
 ## Required agent configuration
 
-Before pointing `ATOMS_AGENT_ID` at a real agent, it needs all of the
-following. Two of the three are scriptable — confirmed against the live API,
-not just docs:
+Before pointing `ATOMS_AGENT_ID` at a real agent, it needs the following —
+all of it scriptable, confirmed by actually running this against a live
+agent rather than from docs (which don't enumerate the full schema):
 
 ```bash
 SMALLEST_API_KEY=... uv run python -m atoms.scripts.provision_agent
 ```
 
-This creates an agent (or reuses one via `--agent-id`), forks a branch, and
-pushes prompt, greeting, and turn-taking settings through
+This creates an agent (or reuses one via `--agent-id`), forks a branch from
+whichever is currently live, and pushes everything below through
 `PUT /agent/{id}/branches/{branchId}/draft` — then publishes and activates
 it. It prints the resulting id to use as `ATOMS_AGENT_ID`.
 
 1. **Prompt and greeting** — `rory_tools/agent_desc.txt` as `globalPrompt`,
-   `rory_tools.prompt.GREETING` as `firstMessage`. Scripted.
+   `rory_tools.prompt.GREETING` as `firstMessage`.
 2. **Turn-taking settings** — mapped from a benchmark report's
    turn-taking-settings findings (the same report this transport implements
-   the harness side of). Scripted, via the `voiceDetectionConfig`/
-   `smartTurnConfig`/`sttMissDetectorConfig` fields `GET /agent/{id}` already
-   shows on every agent:
+   the harness side of), via the `voiceDetectionConfig`/`smartTurnConfig`/
+   `sttMissDetectorConfig` fields `GET /agent/{id}` already shows on every
+   agent:
    | Benchmark setting | Atoms field | Value this script pushes |
    |---|---|---|
    | 0.6–0.8 s silence before taking the turn | `voiceDetectionConfig.releaseTimeInSecs` | 0.7 (default is 0.2) |
@@ -78,16 +78,16 @@ it. It prints the resulting id to use as `ATOMS_AGENT_ID`.
    `allowInterruptions` / `interruptionBackoffTimer` are the nearest levers
    but do not reproduce either one. Flag this as a known gap rather than
    silently dropping it.
-3. **Tools, as client tools, not API tools** — confirmed NOT scriptable: a
-   `tools` field on the draft (and every other shape tried —
-   `workflowTools`, nested under `workflow`, a guessed
-   `.../draft/workflow` route) was rejected with `{"status": false,
-   "errors": ["No recognized config fields in request body"]}` or 404'd. See
-   `rory_atoms/tools.py`'s module docstring for why client tools matter (not
-   API tools). In the console's Tools tab, paste the output of:
-   ```bash
-   uv run python -m rory_atoms.tools
-   ```
+3. **Tools, as client tools, not API tools** — the one that took the most
+   digging. A bare top-level `tools` field (or `workflowTools`, or nested
+   under a plain `workflow` key, or a guessed `.../draft/workflow` route) is
+   rejected with `{"status": false, "errors": ["No recognized config fields
+   in request body"]}` or 404s. What actually works: nesting under
+   `singlePromptConfig` alongside the type discriminator this agent needs —
+   `{"type": "single_prompt", "singlePromptConfig": {"prompt": ...,
+   "tools": [...]}}`. See `rory_atoms/tools.py`'s module docstring for why
+   client tools matter (not API tools) and the exact per-tool shape
+   (`llmParameters`, `text`/`number`/`boolean` types — not JSON Schema's).
 
 ## The harness
 
@@ -125,10 +125,12 @@ cd .. && uv run pytest -q atoms/tests
 ```
 
 `test_parity_atoms.py` runs the shared parity assertions against
-`provisioning_payload()` (what a human actually pushes to the agent, since
-there is no wire-sent tool array to read back the way other transports'
-parity tests do), checks the connect URL, and checks the container fails
-closed at boot without `SMALLEST_API_KEY` or `ATOMS_AGENT_ID`.
+`provisioning_payload()` — what `provision_agent.py` actually pushes to the
+agent, since there's no per-call wire-sent tool array to read back the way
+other transports' parity tests do — including an explicit, separate check
+for `make_payment`'s one unrepresentable constraint rather than silently
+passing or failing it. Also checks the connect URL, and that the container
+fails closed at boot without `SMALLEST_API_KEY` or `ATOMS_AGENT_ID`.
 `test_pumps_atoms.py` scripts the receive loop directly: tool-call dispatch
 and reply, a truncated-arguments call skipped rather than dispatched, audio
 bridging, a non-fatal `interruption`, and a fatal `error` event.

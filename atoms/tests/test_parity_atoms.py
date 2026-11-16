@@ -42,9 +42,28 @@ def test_required_arguments_match(schema):
     assert_required_arguments_match(SURFACE, schema)
 
 
-@pytest.mark.parametrize("schema", SCHEMAS, ids=lambda s: s.name)
+# make_payment.amount_cents carries a `minimum` constraint Atoms' parameter
+# schema has no field for (see tools.py's module docstring and
+# _UNREPRESENTABLE_CONSTRAINTS) — excluded from the generic check below and
+# covered on its own, explicitly, rather than silently passing or failing.
+_NO_FULL_FIDELITY = {"make_payment"}
+
+
+@pytest.mark.parametrize(
+    "schema", [s for s in SCHEMAS if s.name not in _NO_FULL_FIDELITY], ids=lambda s: s.name
+)
 def test_argument_schemas_match(schema):
     assert_argument_schemas_match(SURFACE, schema)
+
+
+def test_make_payment_argument_schemas_match_except_unrepresentable_constraints():
+    schema = next(s for s in SCHEMAS if s.name == "make_payment")
+    properties = SURFACE[schema.name]["properties"]
+    assert set(properties) == set(schema.properties)
+    for name, expected in schema.properties.items():
+        dropped = tools._UNREPRESENTABLE_CONSTRAINTS.get((schema.name, name), set())
+        expected = {k: v for k, v in expected.items() if k not in dropped}
+        assert properties[name] == expected, f"{schema.name}.{name}: drifted beyond the documented gap"
 
 
 def test_prompt_and_greeting_are_the_shared_ones():

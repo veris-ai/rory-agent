@@ -1,18 +1,23 @@
-"""Push Rory's scriptable config onto a real Atoms agent.
+"""Push Rory's entire config onto a real Atoms agent — prompt, greeting,
+turn-taking settings, and the 16 tools.
 
 Confirmed against the live API (not just docs, which don't enumerate a full
 schema): ``PUT /agent/{id}/branches/{branchId}/draft`` accepts the same
-camelCase fields shown on ``GET /agent/{id}`` — ``globalPrompt``,
-``firstMessage``, ``voiceDetectionConfig``, ``smartTurnConfig``,
-``sttMissDetectorConfig`` all round-tripped correctly in testing.
+camelCase fields shown on ``GET /agent/{id}`` for the top-level settings
+(``globalPrompt``, ``firstMessage``, ``voiceDetectionConfig``,
+``smartTurnConfig``, ``sttMissDetectorConfig``). Tools took more digging: a
+bare top-level ``tools`` field (or ``workflowTools``, or nested under a plain
+``workflow`` key) is rejected with ``"No recognized config fields in request
+body"``. What actually works is nesting them under a ``singlePromptConfig``
+block alongside the discriminator this agent type needs:
 
-``tools`` is NOT one of them. Every shape tried (``tools``, ``workflowTools``,
-``workflow.tools``, ``workflow_tools``, as a top-level field on the draft and
-on a guessed ``.../draft/workflow`` route that turned out not to exist) was
-rejected with ``{"status": false, "errors": ["No recognized config fields in
-request body"]}``, or 404. Registering Rory's 16 tools as Atoms client tools
-is a genuine manual step — see ``rory_atoms/tools.py``'s module docstring —
-not a gap in this script.
+    {"type": "single_prompt", "singlePromptConfig": {"prompt": ..., "tools": [...]}}
+
+— confirmed by watching the draft's ``workflow_tools`` block id actually
+change on acceptance (it's otherwise identical across every rejected
+attempt). See ``rory_atoms/tools.py`` for the per-tool shape and the one
+JSON-Schema constraint (``make_payment.amount_cents``'s ``minimum``) that
+genuinely has nowhere to go in it.
 
 Usage::
 
@@ -20,10 +25,10 @@ Usage::
         --agent-id <existing agent id, or omit to create one> \\
         --branch-name atoms-transport
 
-Creates (or reuses) an agent, forks a branch from its live one, pushes the
-config above, publishes, and activates — so the branch is what the agent
-actually answers calls with. Printed at the end: the agent id to use as
-``ATOMS_AGENT_ID``, and a reminder of the one step this cannot do for you.
+Creates (or reuses) an agent, forks a branch from whichever is currently
+live, pushes everything above, publishes, and activates it — so the branch
+is what the agent actually answers calls with. Prints the agent id to use as
+``ATOMS_AGENT_ID``.
 """
 
 from __future__ import annotations
@@ -38,6 +43,8 @@ from typing import Any, Dict
 import httpx
 
 from rory_tools.prompt import GREETING, load_agent_prompt
+
+from rory_atoms.tools import TOOLS
 
 BASE_URL = "https://api.smallest.ai/atoms/v1"
 
@@ -75,12 +82,15 @@ def create_agent(client: httpx.Client, name: str) -> str:
     return data  # POST /agent returns the bare id string in "data"
 
 
-def default_branch_id(client: httpx.Client, agent_id: str) -> str:
+def live_branch_id(client: httpx.Client, agent_id: str) -> str:
+    """The branch to fork from — whichever is currently live, so a re-run
+    builds on the agent's actual current state rather than its original
+    default branch."""
     data = _raise_for_status(client.get(f"/agent/{agent_id}/branches"))
     for entry in data["branches"]:
-        if entry["branch"]["isDefault"]:
+        if entry["isLive"]:
             return entry["branch"]["_id"]
-    raise RuntimeError(f"agent {agent_id} has no default branch")
+    raise RuntimeError(f"agent {agent_id} has no live branch")
 
 
 def fork_branch(client: httpx.Client, agent_id: str, source_branch_id: str, name: str) -> str:
@@ -92,9 +102,12 @@ def fork_branch(client: httpx.Client, agent_id: str, source_branch_id: str, name
 
 
 def push_draft(client: httpx.Client, agent_id: str, branch_id: str) -> None:
+    prompt = load_agent_prompt()
     body = {
-        "globalPrompt": load_agent_prompt(),
+        "globalPrompt": prompt,
         "firstMessage": GREETING,
+        "type": "single_prompt",
+        "singlePromptConfig": {"prompt": prompt, "tools": TOOLS},
         **TURN_TAKING_CONFIG,
     }
     _raise_for_status(client.put(f"/agent/{agent_id}/branches/{branch_id}/draft", json=body))
@@ -105,7 +118,8 @@ def publish_and_activate(client: httpx.Client, agent_id: str, branch_id: str, la
         f"/agent/{agent_id}/branches/{branch_id}/draft/publish", json={"label": label}
     ))
     # Publishing can run an async security scan ("scanning" -> "committed");
-    # poll the branch until it has no open draft before activating.
+    # poll the branch until it has no open draft before activating, or
+    # activation can land on the pre-publish revision.
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         data = _raise_for_status(client.get(f"/agent/{agent_id}/branches/{branch_id}"))
@@ -122,28 +136,22 @@ def main() -> None:
     parser.add_argument("--agent-id", help="Reuse an existing agent instead of creating one")
     parser.add_argument("--agent-name", default="Rory (Acme Energy, rory-agent atoms transport)")
     parser.add_argument("--branch-name", default="atoms-transport")
-    parser.add_argument("--label", default="Rory prompt and turn-taking")
+    parser.add_argument("--label", default="Rory prompt, turn-taking, tools")
     args = parser.parse_args()
 
     with _client() as client:
         agent_id = args.agent_id or create_agent(client, args.agent_name)
         print(f"agent: {agent_id}", file=sys.stderr)
 
-        source_branch = default_branch_id(client, agent_id)
+        source_branch = live_branch_id(client, agent_id)
         branch_id = fork_branch(client, agent_id, source_branch, args.branch_name)
         print(f"branch: {branch_id}", file=sys.stderr)
 
         push_draft(client, agent_id, branch_id)
         publish_and_activate(client, agent_id, branch_id, args.label)
-        print("published and activated", file=sys.stderr)
+        print(f"published and activated with {len(TOOLS)} tools", file=sys.stderr)
 
     print(json.dumps({"ATOMS_AGENT_ID": agent_id}))
-    print(
-        "\nOne step left this script cannot do: register the 16 tools below "
-        "as CLIENT tools (not API tools) in the console's Tools tab — "
-        "`uv run python -m rory_atoms.tools` to print them again.",
-        file=sys.stderr,
-    )
 
 
 if __name__ == "__main__":
