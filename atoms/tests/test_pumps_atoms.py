@@ -206,15 +206,12 @@ def test_abnormal_connection_close_is_raised_as_a_failure(monkeypatch):
         _run([], monkeypatch, raise_on_exhaustion=close)
 
 
-def test_setup_error_event_raises(monkeypatch):
-    events = [{"type": "error", "code": "internal_error", "message": "fixture failure"}]
-
-    with pytest.raises(RuntimeError, match="fixture failure"):
-        _run(events, monkeypatch)
-
-
-@pytest.mark.parametrize("code", ["tool_timeout", "unknown_call_id", "result_too_large"])
-def test_non_fatal_error_events_are_logged_and_the_call_continues(monkeypatch, code):
+@pytest.mark.parametrize("code", ["tool_timeout", "unknown_call_id", "result_too_large", "some_future_code"])
+def test_error_events_reaching_the_live_loop_never_fail_the_call(monkeypatch, code):
+    """Setup-time failures (a rejected tool declaration, a bad connect) are
+    raised in _connect_once/_declare_tools, before this loop ever starts —
+    so every error this loop sees is scoped to one call or one tool call,
+    known code or not, and never tears the session down."""
     events = [
         {"type": "error", "code": code, "message": "fixture"},
         {"type": "session.closed", "reason": "ended"},

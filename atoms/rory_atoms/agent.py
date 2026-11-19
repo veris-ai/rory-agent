@@ -72,12 +72,6 @@ OUTPUT_LOOKAHEAD_S = 0.3
 # caller, and is raised rather than treated as a normal end.
 NORMAL_CLOSE_REASONS = {"client_requested", "ended"}
 
-# Atoms errors that are about one call or one tool call, not the session
-# itself — the round that hit one can't be redone, but the call is still
-# live and worth continuing rather than tearing down over. Anything else is
-# treated as a setup/session-level failure and raised.
-NON_FATAL_ERROR_CODES = {"tool_timeout", "unknown_call_id", "result_too_large"}
-
 # Roughly one heartbeat per second at 20 ms frames.
 LOG_EVERY_N_FRAMES = 50
 
@@ -197,6 +191,52 @@ def _auth_headers() -> dict:
     return {"Authorization": f"Bearer {os.environ['ATOMS_API_KEY']}"}
 
 
+# How long a session.update declaring tools may go unacknowledged before it
+# is resent, and the overall deadline across every attempt. One under the
+# gateway's own pre-worker control-message buffer — one more send than that
+# is refused with a too_many_updates error.
+TOOLS_RESEND_S = 3.0
+TOOLS_READY_TIMEOUT_S = 8.0
+MAX_TOOL_UPDATE_SENDS = 7
+
+_TOOL_NAMES = frozenset(t["name"] for t in TOOLS)
+
+
+async def _declare_tools(atoms_ws) -> None:
+    """Send ``session.update`` declaring Rory's tools; resend until every one
+    is acked or the deadline passes.
+
+    A declaration can go unacknowledged even though Atoms buffers it until
+    the model side is subscribed — on a real call this has taken as long as
+    20s to ack, and sometimes never arrives at all — so one send and a single
+    wait is not enough. Atoms applies a declaration with replace semantics,
+    so resending a duplicate is harmless and gets acknowledged again.
+    """
+    deadline = time.monotonic() + TOOLS_READY_TIMEOUT_S
+    sends = 0
+    while True:
+        if sends < MAX_TOOL_UPDATE_SENDS:
+            await atoms_ws.send(json.dumps({"type": "session.update", "tools": TOOLS}))
+            sends += 1
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(f"no session.updated for all tools after {sends} session.update(s)")
+        try:
+            raw = await asyncio.wait_for(atoms_ws.recv(), min(TOOLS_RESEND_S, remaining))
+        except asyncio.TimeoutError:
+            continue
+        evt = json.loads(raw)
+        etype = evt.get("type")
+        if etype == "session.updated":
+            if _TOOL_NAMES.issubset(evt.get("tools") or []):
+                return
+            continue  # an ack for a resend, or a partial list — keep waiting
+        if etype == "error":
+            raise RuntimeError(f"Atoms rejected the tool declaration: {evt.get('code')} {evt.get('message')}")
+        # Anything else (e.g. audio starting before setup finishes) is not
+        # actionable here and is dropped rather than buffered.
+
+
 async def _connect_once():
     atoms_ws = await websockets.connect(
         _atoms_url(), max_size=None, additional_headers=_auth_headers()
@@ -214,13 +254,9 @@ async def _connect_once():
         call_id = created.get("call_id")
 
         # Rory's 16 tools are declared here, per session, rather than stored
-        # on the agent — nothing waits on this but the handshake itself, so
-        # no audio can cross the wire before the model actually has a tool
-        # list to call into.
-        await atoms_ws.send(json.dumps({"type": "session.update", "session": {"tools": TOOLS}}))
-        updated = json.loads(await atoms_ws.recv())
-        if updated.get("type") != "session.updated":
-            raise RuntimeError(f"expected session.updated, got {updated.get('type')!r}")
+        # on the agent — no audio can cross the wire before the model
+        # actually has a tool list to call into.
+        await _declare_tools(atoms_ws)
 
         return atoms_ws, sample_rate, call_id
     except Exception:
@@ -360,15 +396,13 @@ async def _pump_atoms_to_actor(
                 raise RuntimeError(f"Atoms session closed abnormally: reason={reason!r}")
 
             elif etype == "error":
-                code = evt.get("code")
-                if code in NON_FATAL_ERROR_CODES:
-                    # Scoped to one call or one tool call, not the session —
-                    # that round is lost, but the call itself is still live
-                    # and worth continuing rather than tearing down over.
-                    logger.warning(f"[at->a] Atoms error (non-fatal): {code} {evt.get('message')}")
-                    continue
-                logger.error(f"[at->a] Atoms error: {code} {evt.get('message')}")
-                raise RuntimeError(f"Atoms error: {code} {evt.get('message')}")
+                # Setup-level errors (a bad tool declaration, a bad connect)
+                # are raised in _connect_once/_declare_tools, before this
+                # loop ever starts. Everything reaching here is scoped to
+                # one call or one tool call — tool_timeout, unknown_call_id,
+                # result_too_large and the like — and the call is still
+                # live, so it is logged rather than torn down over.
+                logger.warning(f"[at->a] Atoms error: {evt.get('code')} {evt.get('message')}")
     except websockets.ConnectionClosed as exc:
         # Reaching this except at all means the socket closed without ever
         # delivering a session.closed we recognized as a normal end — the

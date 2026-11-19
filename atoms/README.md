@@ -23,9 +23,14 @@ and posts the result back on the same socket. Nothing dials in.
   rate, so neither leg is resampled. The API key rides as an `Authorization`
   header on the connection, not a URL query parameter.
 - The server's first message is `session.created`. Right after it, this
-  bridge sends one `session.update` declaring Rory's 16 tools — each one's
+  bridge sends `session.update` declaring Rory's 16 tools — each one's
   `parameters` is `ToolSchema.parameters()` verbatim, not translated into a
-  lossier shape — and waits for `session.updated` before any audio moves.
+  lossier shape — and waits for `session.updated` to list every one of them
+  before any audio moves. A declaration can go unacknowledged even though
+  Atoms buffers it, so it is resent every few seconds (a duplicate is
+  harmless — declarations replace, they don't accumulate) up to a capped
+  number of attempts and an overall deadline, rather than sent once and
+  waited on indefinitely.
 - Audio streams as `input_audio_buffer.append` (client) /
   `output_audio.delta` (server, field `audio`). Output audio is paced to at
   most 0.3s ahead of when it should play; the pacing clock restarts whenever
@@ -44,11 +49,13 @@ and posts the result back on the same socket. Nothing dials in.
   we recognized as normal — regardless of its numeric close code — is this
   bridge's own failure, not the agent hanging up, and is raised rather than
   logged as a clean exit.
-- `error` events for `tool_timeout`, `unknown_call_id`, or `result_too_large`
-  are scoped to one call, not the session: logged, and the call continues.
-  Any other `error` is treated as a setup/session failure and raised.
-- A failed connect or handshake (including a missing `session.updated`
-  acknowledgment) is retried once before giving up.
+- An `error` event reaching the main loop (`tool_timeout`, `unknown_call_id`,
+  `result_too_large`, and the like) is always scoped to one call or one tool
+  call, never the session — it is logged and the call continues. Only a
+  setup-time failure (a bad connect, a rejected tool declaration) ends the
+  call; those are raised before this loop ever starts.
+- A failed connect or handshake (including tool declarations that are never
+  fully acknowledged within the deadline) is retried once before giving up.
 - The Atoms `call_id` from `session.created` is logged for every call.
 
 ## Required agent configuration
