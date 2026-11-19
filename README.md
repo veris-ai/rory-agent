@@ -50,6 +50,8 @@ wrong.
 | [`dialt`](dialt/) | Dialt's managed voice API over a WebSocket; `DIALT_BRAIN` selects Dialt Fast or Dialt Smart, with Rory's tools dispatched locally |
 | [`phonic`](phonic/) | Phonic speech-to-speech over its conversation websocket — one `config` per call carrying the shared prompt, greeting and tools as inline `custom_websocket` tools, Rory's tools answered by the pod with `tool_call_output` |
 | [`agentcore`](agentcore/) | Amazon Connect's voice stack — Lex for speech-to-text, Bedrock AgentCore Runtime for the model and tool rounds, Polly for speech — a hand-rolled cascade, Rory's tools dispatched locally |
+| [`hydra`](hydra/) | Smallest AI's Hydra speech-to-speech model (`hydra-v1.1`) — one realtime websocket per call, OpenAI-Realtime-shaped tool-call events over its own session handshake, no transcript on the wire |
+| [`rime-prism`](rime-prism/) | Rime Prism speech-to-speech through the Rime Python SDK — one session per call carrying the shared prompt and tools, Prism's own turn-taking, the SDK's conversation runner bridging the actor's audio, Rory's tools dispatched locally |
 | [`polyai-dialog-rsn-1`](polyai-dialog-rsn-1/) | PolyAI's Dialog-RSN-1 realtime API — an audio-native model that hears the caller, decides when their turn is over and writes the reply, which PolyAI voices with Cartesia; one OpenAI-Realtime-compatible websocket per call, Rory's tools dispatched locally |
 
 Each ships as its own image, built from one shared lockfile with
@@ -71,7 +73,7 @@ gemini-live/   Gemini Live transport
 gemini-live-xt-thinking/   Gemini 3.8 Live Extended Thinking (copy of gemini-live)
 openai-realtime/, deepgram/, elevenlabs/, elevenlabs-realtime/, livekit/, mistral/, fluxions/, huggingface/,
 grok-voice/, vapi/, cartesia/, gradium/, polyai/, gpt-live/,
-grok-cascade/, smallest/, dialt/, phonic/, agentcore/, polyai-dialog-rsn-1/  twenty more transports, same contract
+grok-cascade/, smallest/, dialt/, phonic/, agentcore/, hydra/, rime-prism/, polyai-dialog-rsn-1/  twenty-two more transports, same contract
 ```
 
 A transport is expected to use three things — `SCHEMAS`, `CallSession`, and
