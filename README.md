@@ -52,6 +52,7 @@ wrong.
 | [`agentcore`](agentcore/) | Amazon Connect's voice stack — Lex for speech-to-text, Bedrock AgentCore Runtime for the model and tool rounds, Polly for speech — a hand-rolled cascade, Rory's tools dispatched locally |
 | [`hydra`](hydra/) | Smallest AI's Hydra speech-to-speech model (`hydra-v1.1`) — one realtime websocket per call, OpenAI-Realtime-shaped tool-call events over its own session handshake, no transcript on the wire |
 | [`rime-prism`](rime-prism/) | Rime Prism speech-to-speech through the Rime Python SDK — one session per call carrying the shared prompt and tools, Prism's own turn-taking, the SDK's conversation runner bridging the actor's audio, Rory's tools dispatched locally |
+| [`polyai-dialog-rsn-1`](polyai-dialog-rsn-1/) | PolyAI's Dialog-RSN-1 realtime API — an audio-native model that hears the caller, decides when their turn is over and writes the reply, which PolyAI voices with Cartesia; one OpenAI-Realtime-compatible websocket per call, Rory's tools dispatched locally |
 
 Each ships as its own image, built from one shared lockfile with
 `uv sync --package`, so a candidate carries only its own voice SDK. Most have
@@ -72,13 +73,18 @@ gemini-live/   Gemini Live transport
 gemini-live-xt-thinking/   Gemini 3.8 Live Extended Thinking (copy of gemini-live)
 openai-realtime/, deepgram/, elevenlabs/, elevenlabs-realtime/, livekit/, mistral/, fluxions/, huggingface/,
 grok-voice/, vapi/, cartesia/, gradium/, polyai/, gpt-live/,
-grok-cascade/, smallest/, dialt/, phonic/, agentcore/, hydra/, rime-prism/  twenty-one more transports, same contract
+grok-cascade/, smallest/, dialt/, phonic/, agentcore/, hydra/, rime-prism/, polyai-dialog-rsn-1/  twenty-two more transports, same contract
 ```
 
 A transport is expected to use three things — `SCHEMAS`, `CallSession`, and
 `dispatch` — and to adapt the first into its own framework's schema type. It
 does not get to reword a tool description, re-implement the verification gate,
-or carry its own prompt.
+or carry its own prompt. The one exception is `polyai-dialog-rsn-1`: Dialog-RSN-1
+ends its turn at the first words it says, so it carries a copy of the prompt
+that puts the words inside the tool call, and gives `verify_caller` and
+`transfer_to_human` one extra spoken argument, `utterance`, through PolyAI's
+`poly_spoken` extension. Its parity test allows exactly that argument (see its
+README).
 
 Parity is enforced per transport: each `<dir>/tests/test_parity_*.py` reads the
 tool declarations back out of the objects it actually hands its framework and checks
