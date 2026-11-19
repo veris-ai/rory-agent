@@ -93,12 +93,12 @@ class Evidence:
     """Records every dispatched tool call (via the monkeypatch) and the audio
     actually heard back, since /voice carries nothing else to observe.
 
-    No silence-gap heuristic here, confirmed against a real call: Atoms
-    streams ``output_audio.delta`` roughly once a second continuously, turn
-    or no turn, so "time since the last audio byte" never ages past ~1s and
-    can never signal a quiet agent. Pacing between utterances is a fixed
-    sleep instead; the real correctness gate is waiting for the expected
-    tool call to actually show up in ``calls``.
+    No silence-gap heuristic here: Atoms streams ``output_audio.delta``
+    roughly once a second continuously, turn or no turn, so "time since the
+    last audio byte" never ages past ~1s and can never signal a quiet agent.
+    Pacing between utterances is a fixed sleep instead; the real correctness
+    gate is waiting for the expected tool call to actually show up in
+    ``calls``.
     """
 
     def __init__(self):
@@ -185,8 +185,8 @@ async def run(speech, evidence):
                             await say("confirm", phrase)
                             await evidence.until(lambda: evidence.result(tool, check), phrase + " result", timeout=60)
 
-                    # Fixed pacing between utterances, sized from a real call
-                    # (greeting ~4s, a short follow-up question ~4-5s): this
+                    # Fixed pacing between utterances, generous enough for a
+                    # greeting or a short follow-up question to finish: this
                     # is scheduling, not a correctness check. Every stage's
                     # real gate is the tool-call result wait below it.
                     PACING_S = 6

@@ -207,10 +207,10 @@ async def _declare_tools(atoms_ws) -> None:
     is acked or the deadline passes.
 
     A declaration can go unacknowledged even though Atoms buffers it until
-    the model side is subscribed — on a real call this has taken as long as
-    20s to ack, and sometimes never arrives at all — so one send and a single
-    wait is not enough. Atoms applies a declaration with replace semantics,
-    so resending a duplicate is harmless and gets acknowledged again.
+    the model side is subscribed — the ack can take several seconds, or
+    never arrive at all — so one send and a single wait is not enough.
+    Atoms applies a declaration with replace semantics, so resending a
+    duplicate is harmless and gets acknowledged again.
     """
     deadline = time.monotonic() + TOOLS_READY_TIMEOUT_S
     sends = 0
