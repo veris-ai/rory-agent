@@ -25,7 +25,17 @@ from rory_tools.parity import (
 
 from rory_atoms import agent, tools
 
-SURFACE = tools.tool_surface()
+# tools.TOOLS is what session.update actually sends (see agent._connect_once) —
+# each entry's "parameters" is ToolSchema.parameters() verbatim, so this is a
+# straight read of the wire payload, not a reconstruction from a lossier shape.
+SURFACE = {
+    tool["name"]: {
+        "description": tool["description"],
+        "required": tool["parameters"]["required"],
+        "properties": tool["parameters"]["properties"],
+    }
+    for tool in tools.TOOLS
+}
 
 
 def test_tool_names_match_the_shared_declaration():
@@ -42,28 +52,9 @@ def test_required_arguments_match(schema):
     assert_required_arguments_match(SURFACE, schema)
 
 
-# make_payment.amount_cents carries a `minimum` constraint Atoms' parameter
-# schema has no field for (see tools.py's module docstring and
-# _UNREPRESENTABLE_CONSTRAINTS) — excluded from the generic check below and
-# covered on its own, explicitly, rather than silently passing or failing.
-_NO_FULL_FIDELITY = {"make_payment"}
-
-
-@pytest.mark.parametrize(
-    "schema", [s for s in SCHEMAS if s.name not in _NO_FULL_FIDELITY], ids=lambda s: s.name
-)
+@pytest.mark.parametrize("schema", SCHEMAS, ids=lambda s: s.name)
 def test_argument_schemas_match(schema):
     assert_argument_schemas_match(SURFACE, schema)
-
-
-def test_make_payment_argument_schemas_match_except_unrepresentable_constraints():
-    schema = next(s for s in SCHEMAS if s.name == "make_payment")
-    properties = SURFACE[schema.name]["properties"]
-    assert set(properties) == set(schema.properties)
-    for name, expected in schema.properties.items():
-        dropped = tools._UNREPRESENTABLE_CONSTRAINTS.get((schema.name, name), set())
-        expected = {k: v for k, v in expected.items() if k not in dropped}
-        assert properties[name] == expected, f"{schema.name}.{name}: drifted beyond the documented gap"
 
 
 def test_prompt_and_greeting_are_the_shared_ones():
@@ -74,15 +65,10 @@ def test_tool_calls_go_through_the_shared_gate():
     assert_uses_shared_dispatcher(agent)
 
 
-def test_provisioning_payload_is_what_tool_surface_was_read_from():
-    """What provision_agent.py actually pushes is the same object the parity
-    check above ran against — not two copies that could quietly drift
-    apart."""
-    assert tools.provisioning_payload() is tools.TOOLS
-
-
-def test_native_end_call_tool_is_not_one_of_the_shared_sixteen():
-    assert tools.NATIVE_END_CALL_TOOL["name"] not in {s.name for s in SCHEMAS}
+def test_session_update_sends_the_same_tools_object_parity_checked_above():
+    """What agent._connect_once actually sends is the same object the parity
+    check above ran against — not two copies that could quietly drift apart."""
+    assert agent.TOOLS is tools.TOOLS
 
 
 def test_connect_url_requests_the_actors_rate_both_ways(monkeypatch):

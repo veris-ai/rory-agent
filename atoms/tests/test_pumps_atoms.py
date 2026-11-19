@@ -100,11 +100,15 @@ def test_empty_arguments_still_dispatch_a_no_argument_tool(monkeypatch):
     assert [m["call_id"] for m in sent] == ["call_1"]
 
 
-def test_tool_calls_run_concurrently_not_sequentially(monkeypatch):
-    """Two calls each 'slow' by 0.1s: sequential dispatch would take ~0.2s,
-    concurrent dispatch (each its own task) takes ~0.1s."""
+def test_tool_calls_run_sequentially_in_arrival_order(monkeypatch):
+    """Two calls each 'slow' by 0.1s must take ~0.2s: both run on the same
+    CallSession, so a second call starting before the first answered would
+    race that shared state."""
 
-    def slow_dispatch(_session_state, _name, _args):
+    order: list[str] = []
+
+    def slow_dispatch(_session_state, name, _args):
+        order.append(name)
         time.sleep(0.1)
         return {"ok": True}
 
@@ -117,8 +121,9 @@ def test_tool_calls_run_concurrently_not_sequentially(monkeypatch):
     _calls, sent, _actor = _run(events, monkeypatch, dispatch=slow_dispatch)
     elapsed = time.monotonic() - start
 
-    assert {m["call_id"] for m in sent} == {"a", "b"}
-    assert elapsed < 0.18, f"took {elapsed:.3f}s — looks sequential, not concurrent"
+    assert order == ["get_account", "list_bills"]
+    assert [m["call_id"] for m in sent] == ["a", "b"]
+    assert elapsed >= 0.2, f"took {elapsed:.3f}s — looks concurrent, not sequential"
 
 
 def test_audio_is_paced_and_forwarded(monkeypatch):
@@ -131,6 +136,36 @@ def test_audio_is_paced_and_forwarded(monkeypatch):
     _calls, _sent, actor_ws = _run(events, monkeypatch)
 
     actor_ws.send_bytes.assert_called_once_with(pcm)
+
+
+def test_pacer_clock_restarts_after_a_silence_gap():
+    """A real gap between chunks must not leave the pacer scheduling off a
+    stale start time — that's what makes everything after the first pause go
+    out with no pacing at all, since the (unreset) target is already in the
+    past by the time audio resumes."""
+    frame_s = 0.2
+    pcm = b"\x00" * int(agent.ACTOR_RATE_HZ * agent.BYTES_PER_SAMPLE * frame_s)
+    actor_ws = AsyncMock()
+
+    async def scenario():
+        paced = agent._PacedOutput(actor_ws)
+        paced.push(pcm)
+        await paced.drain()
+        await asyncio.sleep(0.5)  # a real silence gap, well past OUTPUT_LOOKAHEAD_S
+
+        start = time.monotonic()
+        for _ in range(3):
+            paced.push(pcm)
+        await paced.drain()
+        elapsed = time.monotonic() - start
+        await paced.aclose()
+        return elapsed
+
+    elapsed = asyncio.run(scenario())
+    # 3 * 0.2s = 0.6s of audio outpaces the 0.3s lookahead by 0.3s once the
+    # clock has correctly restarted; a clock that never reset would instead
+    # flood all three out with ~0 pacing.
+    assert elapsed > 0.2, f"took {elapsed:.3f}s — chunks after a gap were not paced, clock never reset"
 
 
 def test_interruption_drops_audio_queued_but_not_yet_sent(monkeypatch):
@@ -156,9 +191,13 @@ def test_abnormal_session_closed_is_raised_as_a_failure(monkeypatch):
         _run(events, monkeypatch)
 
 
-def test_normal_connection_close_ends_quietly(monkeypatch):
+def test_connection_close_not_preceded_by_ended_is_a_failure_even_at_code_1000(monkeypatch):
+    """A clean-looking close (1000/1001/1005) is not proof the agent ended
+    the call normally — only a session.closed(ended) we actually saw is.
+    Reaching this path at all means we never saw one."""
     close = websockets.ConnectionClosedOK(Close(CloseCode.NORMAL_CLOSURE, ""), None)
-    _run([], monkeypatch, raise_on_exhaustion=close)  # must not raise
+    with pytest.raises(RuntimeError, match="abnormally"):
+        _run([], monkeypatch, raise_on_exhaustion=close)
 
 
 def test_abnormal_connection_close_is_raised_as_a_failure(monkeypatch):
@@ -167,8 +206,18 @@ def test_abnormal_connection_close_is_raised_as_a_failure(monkeypatch):
         _run([], monkeypatch, raise_on_exhaustion=close)
 
 
-def test_error_event_raises(monkeypatch):
+def test_setup_error_event_raises(monkeypatch):
     events = [{"type": "error", "code": "internal_error", "message": "fixture failure"}]
 
     with pytest.raises(RuntimeError, match="fixture failure"):
         _run(events, monkeypatch)
+
+
+@pytest.mark.parametrize("code", ["tool_timeout", "unknown_call_id", "result_too_large"])
+def test_non_fatal_error_events_are_logged_and_the_call_continues(monkeypatch, code):
+    events = [
+        {"type": "error", "code": code, "message": "fixture"},
+        {"type": "session.closed", "reason": "ended"},
+    ]
+
+    _run(events, monkeypatch)  # must not raise

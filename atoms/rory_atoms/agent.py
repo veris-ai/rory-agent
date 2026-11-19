@@ -12,15 +12,17 @@ assembles internally. This bridge does not need to know or care: the wire
 protocol over ``/agent/connect`` is one audio-in/audio-out websocket either
 way, turn-taking and barge-in are owned server-side, and what this module
 adds is the ``voice_ws`` bridging, the per-call ``CallSession``, pacing
-output audio to a bounded lookahead, and the hop onto a worker thread for
-the blocking vendor calls.
+output audio to a bounded lookahead, declaring Rory's tools fresh on every
+call, and the hop onto a worker thread for the blocking vendor calls.
 
-There is no per-connection session configuration at all — prompt, greeting,
-turn-taking settings and the tool list all live on the Atoms agent itself,
-pushed by ``atoms/scripts/provision_agent.py``. ``AGENT_PROMPT``/``GREETING``
-below are imported only so this transport asserts the same parity contract
-as every other candidate (``rory_tools.parity.assert_shares_prompt_and_greeting``);
-they are read, never transmitted.
+Prompt, greeting and turn-taking settings live on the Atoms agent itself.
+Rory's 16 tools do not — they are declared per session, right after
+``session.created``, with one ``session.update`` this bridge sends and
+waits on ``session.updated`` for before any audio moves. ``AGENT_PROMPT``/
+``GREETING`` below are imported only so this transport asserts the same
+parity contract as every other candidate
+(``rory_tools.parity.assert_shares_prompt_and_greeting``); they are read,
+never transmitted.
 
 The Veris actor speaks and listens at 24 kHz PCM16; both legs of this
 connection are opened at ``pcm_24000`` too, so no resampling runs in either
@@ -42,6 +44,8 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from rory_tools import CallSession, dispatch
 from rory_tools.prompt import GREETING, load_agent_prompt
+
+from .tools import TOOLS
 
 ATOMS_BASE_URL = "wss://api.smallest.ai/atoms/v1/agent/connect"
 ATOMS_AGENT_ID = os.environ.get("ATOMS_AGENT_ID", "")
@@ -67,6 +71,12 @@ OUTPUT_LOOKAHEAD_S = 0.3
 # bridge's own infrastructure failing, not the agent hanging up on the
 # caller, and is raised rather than treated as a normal end.
 NORMAL_CLOSE_REASONS = {"client_requested", "ended"}
+
+# Atoms errors that are about one call or one tool call, not the session
+# itself — the round that hit one can't be redone, but the call is still
+# live and worth continuing rather than tearing down over. Anything else is
+# treated as a setup/session-level failure and raised.
+NON_FATAL_ERROR_CODES = {"tool_timeout", "unknown_call_id", "result_too_large"}
 
 # Roughly one heartbeat per second at 20 ms frames.
 LOG_EVERY_N_FRAMES = 50
@@ -98,8 +108,6 @@ class _PacedOutput:
     def __init__(self, actor_ws: WebSocket) -> None:
         self._actor_ws = actor_ws
         self._queue: asyncio.Queue[bytes] = asyncio.Queue()
-        self._played_s = 0.0
-        self._start: float | None = None
         self._task = asyncio.create_task(self._run(), name="paced-output")
 
     def push(self, pcm: bytes) -> None:
@@ -109,8 +117,6 @@ class _PacedOutput:
         while not self._queue.empty():
             self._queue.get_nowait()
             self._queue.task_done()
-        self._played_s = 0.0
-        self._start = None
 
     async def drain(self) -> None:
         await self._queue.join()
@@ -123,17 +129,24 @@ class _PacedOutput:
             pass
 
     async def _run(self) -> None:
+        # started + sent_s is how far playback has been scheduled out to; a
+        # silence gap means real time has already passed that point, and the
+        # clock has to restart there rather than keep compounding off a
+        # start time from before the gap — otherwise everything after the
+        # first pause gets scheduled too early and drains out at 2x.
+        started: float | None = None
+        sent_s = 0.0
         while True:
             pcm = await self._queue.get()
             try:
-                if self._start is None:
-                    self._start = time.monotonic()
-                target = self._start + self._played_s - OUTPUT_LOOKAHEAD_S
                 now = time.monotonic()
-                if target > now:
-                    await asyncio.sleep(target - now)
+                if started is None or now >= started + sent_s:
+                    started, sent_s = now, 0.0
                 await self._actor_ws.send_bytes(pcm)
-                self._played_s += len(pcm) / BYTES_PER_SAMPLE / ACTOR_RATE_HZ
+                sent_s += len(pcm) / BYTES_PER_SAMPLE / ACTOR_RATE_HZ
+                ahead = sent_s - (time.monotonic() - started)
+                if ahead > OUTPUT_LOOKAHEAD_S:
+                    await asyncio.sleep(ahead - OUTPUT_LOOKAHEAD_S)
             finally:
                 self._queue.task_done()
 
@@ -153,9 +166,10 @@ async def run_voice_ws_bot(actor_ws: WebSocket) -> None:
     t_start = time.monotonic()
     atoms_ws = None
     try:
-        atoms_ws, sample_rate = await _connect_with_retry()
+        atoms_ws, sample_rate, call_id = await _connect_with_retry()
         logger.info(
-            f"[voice] Atoms connected agent_id={ATOMS_AGENT_ID} sample_rate={sample_rate}"
+            f"[voice] Atoms connected agent_id={ATOMS_AGENT_ID} call_id={call_id} "
+            f"sample_rate={sample_rate} tools={len(TOOLS)}"
         )
 
         up = asyncio.create_task(_pump_actor_to_atoms(actor_ws, atoms_ws), name="actor->atoms")
@@ -197,7 +211,18 @@ async def _connect_once():
                 f"Atoms announced sample_rate={sample_rate}, expected {ACTOR_RATE_HZ} "
                 f"(requested via input_audio_format/output_audio_format={AUDIO_FORMAT})"
             )
-        return atoms_ws, sample_rate
+        call_id = created.get("call_id")
+
+        # Rory's 16 tools are declared here, per session, rather than stored
+        # on the agent — nothing waits on this but the handshake itself, so
+        # no audio can cross the wire before the model actually has a tool
+        # list to call into.
+        await atoms_ws.send(json.dumps({"type": "session.update", "session": {"tools": TOOLS}}))
+        updated = json.loads(await atoms_ws.recv())
+        if updated.get("type") != "session.updated":
+            raise RuntimeError(f"expected session.updated, got {updated.get('type')!r}")
+
+        return atoms_ws, sample_rate, call_id
     except Exception:
         await atoms_ws.close()
         raise
@@ -265,11 +290,14 @@ async def _handle_function_call(atoms_ws, session_state: CallSession, evt: dict)
         logger.warning(f"[at->a] tool {name} ({call_id}) arguments truncated: {raw_args!r}")
         result = {"error": "the arguments for this call were cut off and could not be read"}
     else:
-        # Every vendor client is blocking; the hop onto a worker thread is
-        # the same reason every other speech-to-speech candidate in this
-        # repo does it. Each call runs as its own task rather than being
-        # awaited inline, so one slow tool does not stall the audio legs or
-        # any other call in flight.
+        # Every vendor client is blocking, so this still hops to a worker
+        # thread rather than running inline on the event loop — the same
+        # reason every other speech-to-speech candidate in this repo does
+        # it. But the await here is inline, not its own task: calls share
+        # CallSession, and running two concurrently on the same session
+        # races its mutation of account/attempt state. One at a time, in
+        # the order they arrived, is what every other candidate that shares
+        # this state does too.
         result = await asyncio.to_thread(dispatch, session_state, name, args)
     logger.info(f"[at->a] tool {name} ({call_id}) -> {json.dumps(result, default=str)}")
     await atoms_ws.send(json.dumps({
@@ -286,7 +314,6 @@ async def _pump_atoms_to_actor(
     n_audio_frames = 0
     n_audio_bytes = 0
     paced = _PacedOutput(actor_ws)
-    pending_calls: set[asyncio.Task] = set()
     normal_end = False
 
     try:
@@ -322,9 +349,7 @@ async def _pump_atoms_to_actor(
                 continue  # logged at debug volume only; not needed to bridge the call
 
             elif etype == "function_call":
-                task = asyncio.create_task(_handle_function_call(atoms_ws, session_state, evt))
-                pending_calls.add(task)
-                task.add_done_callback(pending_calls.discard)
+                await _handle_function_call(atoms_ws, session_state, evt)
 
             elif etype == "session.closed":
                 reason = evt.get("reason")
@@ -335,18 +360,31 @@ async def _pump_atoms_to_actor(
                 raise RuntimeError(f"Atoms session closed abnormally: reason={reason!r}")
 
             elif etype == "error":
-                logger.error(f"[at->a] Atoms error: {evt.get('code')} {evt.get('message')}")
-                raise RuntimeError(f"Atoms error: {evt.get('code')} {evt.get('message')}")
+                code = evt.get("code")
+                if code in NON_FATAL_ERROR_CODES:
+                    # Scoped to one call or one tool call, not the session —
+                    # that round is lost, but the call itself is still live
+                    # and worth continuing rather than tearing down over.
+                    logger.warning(f"[at->a] Atoms error (non-fatal): {code} {evt.get('message')}")
+                    continue
+                logger.error(f"[at->a] Atoms error: {code} {evt.get('message')}")
+                raise RuntimeError(f"Atoms error: {code} {evt.get('message')}")
     except websockets.ConnectionClosed as exc:
-        # Code 1000 (or no code at all, which websockets treats the same as
-        # a clean close) is a normal close; anything else is this bridge's
-        # own connection failing, not the agent ending the call.
-        if exc.code in (1000, None):
-            logger.info(f"[at->a] Atoms WS closed normally; {n_audio_bytes} audio bytes streamed")
-            normal_end = True
-        else:
-            logger.error(f"[at->a] Atoms WS closed abnormally code={exc.code} reason={exc.reason}")
-            raise RuntimeError(f"Atoms connection closed abnormally: code={exc.code}") from exc
+        # Reaching this except at all means the socket closed without ever
+        # delivering a session.closed we recognized as a normal end — the
+        # loop above already breaks out on one before iteration can raise
+        # here. So this is always this bridge's own connection failing, not
+        # the agent ending the call, regardless of the numeric close code
+        # (1000/1001/1005 included — websockets 15 deprecates .code/.reason,
+        # so the close frame is read off .rcvd instead).
+        close = exc.rcvd
+        logger.error(
+            f"[at->a] Atoms WS closed without a prior session.closed(ended); "
+            f"code={close.code if close else None} reason={close.reason if close else None!r}"
+        )
+        raise RuntimeError(
+            f"Atoms connection closed abnormally: code={close.code if close else None}"
+        ) from exc
     except WebSocketDisconnect:
         logger.info("[at->a] actor WS closed; ending Atoms receive loop")
         normal_end = True
@@ -354,8 +392,3 @@ async def _pump_atoms_to_actor(
         if normal_end:
             await paced.drain()
         await paced.aclose()
-        # Let in-flight calls finish and answer rather than cancelling them —
-        # "answer every tool call" has to hold even for one still running
-        # when the session ends, not just the common case.
-        if pending_calls:
-            await asyncio.gather(*pending_calls, return_exceptions=True)

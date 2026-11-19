@@ -52,7 +52,7 @@ wrong.
 | [`agentcore`](agentcore/) | Amazon Connect's voice stack — Lex for speech-to-text, Bedrock AgentCore Runtime for the model and tool rounds, Polly for speech — a hand-rolled cascade, Rory's tools dispatched locally |
 | [`hydra`](hydra/) | Smallest AI's Hydra speech-to-speech model (`hydra-v1.1`) — one realtime websocket per call, OpenAI-Realtime-shaped tool-call events over its own session handshake, no transcript on the wire |
 | [`rime-prism`](rime-prism/) | Rime Prism speech-to-speech through the Rime Python SDK — one session per call carrying the shared prompt and tools, Prism's own turn-taking, the SDK's conversation runner bridging the actor's audio, Rory's tools dispatched locally |
-| [`atoms`](atoms/) | Smallest AI's Atoms platform over its unified realtime websocket (`wss://api.smallest.ai/atoms/v1/agent/connect`) — one session per call, no per-connection configuration at all (prompt, greeting, turn-taking and tools are provisioned onto the agent itself, see `atoms/README.md`), Rory's tools dispatched locally as Atoms client tools |
+| [`atoms`](atoms/) | Smallest AI's Atoms platform over its unified realtime websocket (`wss://api.smallest.ai/atoms/v1/agent/connect`) — one session per call, prompt/greeting/turn-taking provisioned onto the agent, Rory's 16 tools declared fresh per session via `session.update`, dispatched locally as Atoms client tools |
 | [`polyai-dialog-rsn-1`](polyai-dialog-rsn-1/) | PolyAI's Dialog-RSN-1 realtime API — an audio-native model that hears the caller, decides when their turn is over and writes the reply, which PolyAI voices with Cartesia; one OpenAI-Realtime-compatible websocket per call, Rory's tools dispatched locally |
 
 Each ships as its own image, built from one shared lockfile with

@@ -5,11 +5,12 @@ writes):
 
     uv run --no-sync python atoms/tests/live_smoke.py --output /tmp/atoms-live.json
 
-Needs ``ATOMS_API_KEY`` and ``ATOMS_AGENT_ID`` pointed at an agent
-provisioned per ``atoms/scripts/provision_agent.py`` (prompt, turn-taking
-settings, and all 16 tools as client tools — a bare agent with no tools will
-never emit a ``function_call`` for this script to catch), plus
-``SMALLEST_API_KEY`` to synthesize the test phrases via Lightning TTS.
+Needs ``ATOMS_API_KEY`` and ``ATOMS_AGENT_ID`` pointed at a provisioned agent
+(prompt and turn-taking settings already configured on it — see
+``atoms/README.md``) plus ``SMALLEST_API_KEY`` to synthesize the test
+phrases via Lightning TTS. Rory's 16 tools need nothing provisioned ahead of
+time: ``rory_atoms.agent`` declares them itself over ``session.update`` on
+every call.
 
 Only raw PCM16 audio crosses ``/voice``, not typed JSON events, so there is
 nothing to relay-and-record. Tool-call evidence instead comes from
