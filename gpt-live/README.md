@@ -61,10 +61,6 @@ trace has to be read from there rather than from SDK instrumentation.
 | `STRIPE_API_KEY` | — | Sandbox fixture; the billing twin's credential. |
 | `FINERACT_USER` / `FINERACT_PASSWORD` / `FINERACT_TENANT` | `mifos` / `password` / `default` | Fineract's public OSS defaults. |
 
-The original GPT-Live 1 benchmark run used `gpt-5.6-terra`. The [VAmoS Pro
-leaderboard](https://veris.ai/leaderboard/vamos-pro) reports 39.2% task completion
-for GPT-Live 1 and 52.4% for GPT-Live 1.1.
-
 ## Tests
 
 ```bash
