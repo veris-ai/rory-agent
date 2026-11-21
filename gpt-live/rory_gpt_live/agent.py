@@ -45,9 +45,12 @@ from .tools import TOOLS
 LIVE_MODEL = os.environ.get("LIVE_MODEL", "gpt-live-1")
 LIVE_URL = "wss://api.openai.com/v1/live/sessions"
 LIVE_VOICE = os.environ.get("LIVE_VOICE", "marin")
-# The Responses model GPT-Live delegates tool use and reasoning to; the
-# benchmark run used gpt-5.6-terra.
-LIVE_BACKEND_MODEL = os.environ.get("LIVE_BACKEND_MODEL", "gpt-5.6-terra")
+# The Responses model GPT-Live delegates tool use and reasoning to.
+LIVE_BACKEND_MODEL = os.environ.get("LIVE_BACKEND_MODEL", "gpt-6.1-terra")
+_BACKEND_REASONING_DEFAULTS = {"gpt-6.1-terra": "high", "gpt-6.2-sol": "medium"}
+LIVE_BACKEND_REASONING_EFFORT = os.environ.get(
+    "LIVE_BACKEND_REASONING_EFFORT", _BACKEND_REASONING_DEFAULTS.get(LIVE_BACKEND_MODEL)
+)
 
 # The Veris actor and GPT-Live both run PCM16 at 24 kHz.
 SAMPLE_RATE_HZ = 24000
@@ -87,23 +90,24 @@ def _session_start() -> dict:
     and the live model is what says it out loud.
     """
     prompt = f"{AGENT_PROMPT}\n\n{today_context()}"
+    backend = {
+        "model": LIVE_BACKEND_MODEL,
+        "instructions": f"{BACKEND_PREAMBLE}{prompt}",
+        "tools": TOOLS,
+        "tool_choice": "auto",
+        # Rory's tools share account state and run one at a time.
+        "parallel_tool_calls": False,
+    }
+    if LIVE_BACKEND_REASONING_EFFORT:
+        backend["reasoning"] = {"effort": LIVE_BACKEND_REASONING_EFFORT}
+
     return {
         "type": "session.start",
         "session": {
             "model": LIVE_MODEL,
             "instructions": prompt,
             "audio": {"output": {"voice": LIVE_VOICE}},
-            "delegation": {
-                "type": "responses",
-                "responses": {
-                    "model": LIVE_BACKEND_MODEL,
-                    "instructions": f"{BACKEND_PREAMBLE}{prompt}",
-                    "tools": TOOLS,
-                    "tool_choice": "auto",
-                    # Rory's tools share account state and run one at a time.
-                    "parallel_tool_calls": False,
-                },
-            },
+            "delegation": {"type": "responses", "responses": backend},
         },
     }
 

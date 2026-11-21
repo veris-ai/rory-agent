@@ -74,6 +74,16 @@ def test_session_keeps_gpt_live_shape():
     assert agent.AGENT_PROMPT in backend["instructions"]
 
 
+@pytest.mark.parametrize("effort", ["high", "medium", None])
+def test_session_sends_configured_backend_reasoning(monkeypatch, effort):
+    monkeypatch.setattr(agent, "LIVE_BACKEND_REASONING_EFFORT", effort)
+    backend = agent._session_start()["session"]["delegation"]["responses"]
+    if effort is None:
+        assert "reasoning" not in backend
+    else:
+        assert backend["reasoning"] == {"effort": effort}
+
+
 def test_greeting_is_a_trusted_instruction_append():
     greeting = agent._greeting_instruction()
     assert greeting["type"] == "session.instructions.append"

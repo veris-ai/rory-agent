@@ -55,7 +55,8 @@ trace has to be read from there rather than from SDK instrumentation.
 |---|---|---|
 | `OPENAI_API_KEY` | — | Required. The project behind it must have GPT-Live access; a key without it fails every call at `session.start` with `Voice session access denied`. |
 | `LIVE_MODEL` | `gpt-live-1` | The live model. |
-| `LIVE_BACKEND_MODEL` | `gpt-5.6-terra` | The Responses model tool use is delegated to (the model used in the benchmark run). |
+| `LIVE_BACKEND_MODEL` | `gpt-6.1-terra` | The Responses model that handles delegated tool use and reasoning. |
+| `LIVE_BACKEND_REASONING_EFFORT` | Depends on backend | Overrides the backend reasoning effort. Defaults to `high` for `gpt-6.1-terra`, `medium` for `gpt-6.2-sol`, and the provider default for other models. |
 | `LIVE_VOICE` | `marin` | Voice name. |
 | `STRIPE_API_KEY` | — | Sandbox fixture; the billing twin's credential. |
 | `FINERACT_USER` / `FINERACT_PASSWORD` / `FINERACT_TENANT` | `mifos` / `password` / `default` | Fineract's public OSS defaults. |
