@@ -33,6 +33,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
 )
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
+from pipecat.services.llm_service import LLMService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.base_transport import BaseTransport
 from pipecat.turns.user_turn_strategies import FilterIncompleteUserTurnStrategies
@@ -83,13 +84,25 @@ def _build_llm() -> OpenAILLMService:
         # Calls share verification and payment state; preserve emitted order.
         run_in_parallel=False,
     )
-    for name, handler in HANDLERS.items():
-        # Synchronous on purpose. cancel_on_interruption=False looks like "let
-        # the call finish" but in pipecat 1.8 it makes the call *async*: the LLM
-        # gets a "still running" placeholder, speaks on it, and the real result
-        # arrives later as a developer message the trace never sees.
-        llm.register_function(name, handler)
+    _register_tools(llm)
     return llm
+
+
+def _register_tools(llm: LLMService) -> None:
+    """Register Rory's tools so an interruption never hides what they did.
+
+    Each handler runs its blocking vendor call on a thread, and a thread cannot
+    be cancelled: with Pipecat's default (``cancel_on_interruption=True``) a
+    caller who barges in mid-call cancelled the handler's await, the LLM was
+    told the call was CANCELLED, and the payment or arrangement went through
+    anyway. With ``cancel_on_interruption=False`` the call always completes and
+    its real result reaches the LLM: in place, exactly as a synchronous result,
+    when nothing interrupted; as a message that prompts a reply when the
+    caller spoke in the meantime. Pipecat adds a note on such late results to
+    the system prompt.
+    """
+    for name, handler in HANDLERS.items():
+        llm.register_function(name, handler, cancel_on_interruption=False)
 
 
 def _build_stt() -> DeepgramSTTService:

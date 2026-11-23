@@ -46,7 +46,9 @@ def _handler(name: str) -> Callable:
         # Every vendor client is blocking, and this runs on the pipeline's
         # event loop — the same loop carrying audio, VAD and TTS for this call.
         # Called directly, a ten-second vendor timeout is ten seconds of dead
-        # air. The thread hop keeps the caller hearing the line.
+        # air. The thread hop keeps the caller hearing the line. A thread can't
+        # be cancelled, so agent.py registers every tool to run to completion
+        # through an interruption (cancel_on_interruption=False).
         result = await asyncio.to_thread(dispatch, session, name, args)
         await params.result_callback(result)
 
