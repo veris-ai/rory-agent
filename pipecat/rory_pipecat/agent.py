@@ -35,11 +35,7 @@ from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.base_transport import BaseTransport
-from pipecat.turns.user_start import (
-    TranscriptionUserTurnStartStrategy,
-)
-from pipecat.turns.user_stop import SpeechTimeoutUserTurnStopStrategy
-from pipecat.turns.user_turn_strategies import UserTurnStrategies
+from pipecat.turns.user_turn_strategies import FilterIncompleteUserTurnStrategies
 from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketParams,
     FastAPIWebsocketTransport,
@@ -64,7 +60,7 @@ PIPELINE_IN_SAMPLE_RATE_HZ = 16000
 PIPELINE_OUT_SAMPLE_RATE_HZ = VERIS_SAMPLE_RATE_HZ
 
 
-# Silero VAD — the end-of-turn detector — constructed ONCE at import.
+# Silero VAD — the speech detector — constructed ONCE at import.
 # uvicorn imports this module before it binds :8008, so the platform's TCP
 # readiness probe only passes after it has loaded. Building it inside
 # _build_pipeline_worker instead cold-loads the ONNX session on the first
@@ -72,7 +68,8 @@ PIPELINE_OUT_SAMPLE_RATE_HZ = VERIS_SAMPLE_RATE_HZ
 # which races — and loses to — the actor's 10 s voice_ws connect timeout,
 # dropping the call before it starts. pipecat has no global model cache, so we
 # share the instance; the bench runs one call per container, and per-connection
-# turn state lives in fresh strategy wrappers built in _build_pipeline_worker.
+# turn state (including Smart Turn, which loads in milliseconds) is built fresh
+# in _build_pipeline_worker.
 _SHARED_VAD = SileroVADAnalyzer()
 
 
@@ -91,8 +88,6 @@ def _build_llm() -> OpenAILLMService:
         # the call finish" but in pipecat 1.8 it makes the call *async*: the LLM
         # gets a "still running" placeholder, speaks on it, and the real result
         # arrives later as a developer message the trace never sees.
-        # False VAD starts no longer cancel tool calls because a user turn now
-        # starts only on a committed transcript (below).
         llm.register_function(name, handler)
     return llm
 
@@ -140,32 +135,22 @@ def _build_pipeline_worker(transport: BaseTransport) -> PipelineWorker:
         RORY_TOOLS,
     )
 
-    # Reuse the import-time analyzers (no per-connection ONNX cold-load); only
-    # the lightweight per-call strategy wrappers are fresh.
+    # Pipecat's turn detection — a turn starts on voice activity or a
+    # transcript, and Smart Turn v3 judges when the caller has finished — gated
+    # on the LLM's own verdict. Every reply opens with ● (complete), ◐ or ○
+    # (cut off, or needs time). Only ● is spoken; ◐ and ○ keep the turn open
+    # and re-prompt the caller after 5 s or 10 s of silence. A tool call counts
+    # as ●. Pipecat appends the marker instructions to the system prompt.
+    #
+    # A sound the STT can't transcribe (a cough, background noise) can still
+    # start a turn and cut Rory off; when that empty turn interrupted a reply,
+    # the aggregator's empty-turn recovery (``empty_user_turn``, on by default)
+    # runs the LLM to ask the caller to repeat, so the call cannot stall.
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
             vad_analyzer=_SHARED_VAD,
-            user_turn_strategies=UserTurnStrategies(
-                # Start a user turn on FINAL transcripts only. Every turn-start
-                # broadcasts an interruption that cancels the agent's in-flight
-                # reply, and a turn that started without words re-settles via a
-                # no-strategy ("None") stop that fires on_user_turn_stopped but
-                # NOT on_user_turn_inference_triggered: the LLM is never invoked
-                # and the call dies in silence until the actor's 600 s cap. Two
-                # starters did that — INTERIM transcripts (pipecat's default;
-                # Deepgram streams many hypotheses mid-reply) and raw Silero VAD,
-                # which fires on cafe babble behind the caller with no speech to
-                # transcribe. A turn
-                # that begins with a committed transcript always ends in
-                # inference. Cost: barge-in lands at Deepgram's final, ~0.5 s
-                # after onset, instead of at VAD onset.
-                start=[TranscriptionUserTurnStartStrategy(use_interim=False)],
-                # ~0.8 s effective end-of-turn silence = 0.2 s Silero VAD
-                # stop_secs + max(0.6 s user_speech_timeout, STT-finalization
-                # safety net).
-                stop=[SpeechTimeoutUserTurnStopStrategy(user_speech_timeout=0.6)],
-            ),
+            user_turn_strategies=FilterIncompleteUserTurnStrategies(),
         ),
     )
 

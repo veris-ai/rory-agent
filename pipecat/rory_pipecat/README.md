@@ -16,7 +16,7 @@ The container startup and how to run a simulation live in the
 
 | Module | Role |
 |--------|------|
-| `agent.py` | The Pipecat pipeline. Deepgram STT → `gpt-4.1-mini` → ElevenLabs TTS with Silero VAD turn-taking, and `run_voice_ws_bot`, the per-connection entry point. |
+| `agent.py` | The Pipecat pipeline. Deepgram STT → `gpt-4.1-mini` → ElevenLabs TTS with Silero VAD and Smart Turn v3 turn-taking, gated on the LLM's turn-completion marker (`●` complete, `◐`/`○` incomplete — Pipecat's `FilterIncompleteUserTurnStrategies`; the markers stay in the model's messages), and `run_voice_ws_bot`, the per-connection entry point. |
 | `tools.py` | The Pipecat adapter: turns each shared `ToolSchema` into a `FunctionSchema`, and wraps `rory_tools.dispatch` in a `FunctionCallParams` handler. No tool logic of its own. |
 | `web.py` | A FastAPI app exposing `WS /voice` (and `/health`) on `:8008`. Hands each accepted WebSocket to `run_voice_ws_bot`. No agent logic — pure transport. |
 | `serializers.py` | `RawPCM16Serializer` — the bytes ↔ frame mapping for the raw PCM16/24 kHz `voice_ws` wire protocol. Inbound audio is resampled to the pipeline's 16 kHz input rate, which Silero VAD requires; outbound 24 kHz TTS audio passes through. |
