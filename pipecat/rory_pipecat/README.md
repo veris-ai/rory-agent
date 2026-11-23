@@ -132,14 +132,6 @@ enrolment and opens the Fineract loan at exactly that principal. An arrangement
 whose amount does not match the balance it is meant to clear is worse than no
 arrangement, and no vendor can catch it.
 
-## Tool results are always non-empty dicts
-
-Pipecat's aggregator only re-runs the LLM after a tool call `if frame.result:`.
-A falsy result (`{}`) means the agent never speaks again and the call deadlocks
-to the simulation timeout. So a miss returns `{"error": "…"}` rather than `{}`,
-and the list tools wrap their possibly-empty list in a named key
-(`{"bills": []}`).
-
 ## Money is in cents
 
 Every amount crossing the tool boundary is an integer number of cents, and
