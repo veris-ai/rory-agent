@@ -19,7 +19,7 @@ The container startup and how to run a simulation live in the
 | `agent.py` | The Pipecat pipeline. Deepgram STT → `gpt-4.1-mini` → ElevenLabs TTS with Silero VAD turn-taking, and `run_voice_ws_bot`, the per-connection entry point. |
 | `tools.py` | The Pipecat adapter: turns each shared `ToolSchema` into a `FunctionSchema`, and wraps `rory_tools.dispatch` in a `FunctionCallParams` handler. No tool logic of its own. |
 | `web.py` | A FastAPI app exposing `WS /voice` (and `/health`) on `:8008`. Hands each accepted WebSocket to `run_voice_ws_bot`. No agent logic — pure transport. |
-| `serializers.py` | `RawPCM16Serializer` — the trivial bytes ↔ frame mapping for the raw PCM16/24 kHz `voice_ws` wire protocol. |
+| `serializers.py` | `RawPCM16Serializer` — the bytes ↔ frame mapping for the raw PCM16/24 kHz `voice_ws` wire protocol. Inbound audio is resampled to the pipeline's 16 kHz input rate, which Silero VAD requires; outbound 24 kHz TTS audio passes through. |
 
 `__init__.py` is empty — this is a plain namespace package, started as
 `uvicorn rory_pipecat.web:app` when `RORY_AGENT_APP` names it.

@@ -10,8 +10,10 @@ Fineract for payment arrangements — which the bench points at its twins:
 
 The transport is Veris's ``voice_ws`` channel: ``run_voice_ws_bot(websocket)``
 wraps a FastAPI ``WebSocket`` (accepted by ``rory_pipecat/web.py:/voice``) in a
-``FastAPIWebsocketTransport`` with ``RawPCM16Serializer`` so the actor's
-PCM16/24 kHz binary frames flow straight through the pipeline.
+``FastAPIWebsocketTransport`` with ``RawPCM16Serializer``. The actor's
+PCM16/24 kHz frames are resampled to the pipeline's 16 kHz input rate on the
+way in (Silero VAD runs only at 8 or 16 kHz); Rory's 24 kHz TTS audio goes
+back out unchanged.
 """
 
 from __future__ import annotations
@@ -48,14 +50,18 @@ from rory_tools import CallSession
 from rory_tools.prompt import GREETING, load_agent_prompt, today_context
 
 from .tools import HANDLERS, RORY_TOOLS
-from .serializers import (
-    VERIS_NUM_CHANNELS,
-    VERIS_SAMPLE_RATE_HZ,
-    RawPCM16Serializer,
-)
+from .serializers import VERIS_SAMPLE_RATE_HZ, RawPCM16Serializer
 
 
 AGENT_PROMPT = load_agent_prompt()
+
+# The pipeline's audio rates, set once in PipelineParams; every service and the
+# transport picks its rate up from there at setup. Input is 16 kHz because
+# Silero VAD accepts only 8 or 16 kHz (the serializer resamples the actor's
+# 24 kHz down to it). Output is the wire's 24 kHz, so TTS audio goes back out
+# without resampling.
+PIPELINE_IN_SAMPLE_RATE_HZ = 16000
+PIPELINE_OUT_SAMPLE_RATE_HZ = VERIS_SAMPLE_RATE_HZ
 
 
 # Silero VAD — the end-of-turn detector — constructed ONCE at import.
@@ -92,11 +98,10 @@ def _build_llm() -> OpenAILLMService:
 
 
 def _build_stt() -> DeepgramSTTService:
-    """Deepgram STT, configured for the Veris voice_ws PCM16 contract."""
+    """Deepgram STT on PCM16 at the pipeline's input rate."""
     return DeepgramSTTService(
         api_key=os.environ["DEEPGRAM_API_KEY"],
         encoding="linear16",
-        sample_rate=VERIS_SAMPLE_RATE_HZ,
         settings=DeepgramSTTService.Settings(
             model=os.environ.get("DEEPGRAM_MODEL", "nova-3-general"),
         ),
@@ -104,10 +109,9 @@ def _build_stt() -> DeepgramSTTService:
 
 
 def _build_tts() -> ElevenLabsTTSService:
-    """ElevenLabs TTS, emitting PCM16 at the Veris voice_ws sample rate."""
+    """ElevenLabs TTS, emitting PCM16 at the pipeline's output rate."""
     return ElevenLabsTTSService(
         api_key=os.environ["ELEVENLABS_API_KEY"],
-        sample_rate=VERIS_SAMPLE_RATE_HZ,
         settings=ElevenLabsTTSService.Settings(
             voice=os.environ.get("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL"),
             model=os.environ.get("ELEVENLABS_TTS_MODEL", "eleven_flash_v2"),
@@ -180,6 +184,8 @@ def _build_pipeline_worker(transport: BaseTransport) -> PipelineWorker:
     return PipelineWorker(
         pipeline,
         params=PipelineParams(
+            audio_in_sample_rate=PIPELINE_IN_SAMPLE_RATE_HZ,
+            audio_out_sample_rate=PIPELINE_OUT_SAMPLE_RATE_HZ,
             enable_metrics=True,
             enable_usage_metrics=True,
         ),
@@ -214,20 +220,15 @@ async def _run_with_transport(transport: BaseTransport, label: str) -> None:
 async def run_voice_ws_bot(websocket) -> None:
     """Run a Pipecat pipeline for a single Veris ``voice_ws`` connection.
 
-    The WebSocket is already accepted by the FastAPI route. Frames are
-    raw PCM16/24 kHz/mono in both directions — see ``RawPCM16Serializer``.
+    The WebSocket is already accepted by the FastAPI route. Frames on the wire
+    are raw PCM16/24 kHz/mono in both directions — see ``RawPCM16Serializer``.
     """
     transport = FastAPIWebsocketTransport(
         websocket=websocket,
         params=FastAPIWebsocketParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
-            audio_in_sample_rate=VERIS_SAMPLE_RATE_HZ,
-            audio_out_sample_rate=VERIS_SAMPLE_RATE_HZ,
-            serializer=RawPCM16Serializer(
-                sample_rate=VERIS_SAMPLE_RATE_HZ,
-                num_channels=VERIS_NUM_CHANNELS,
-            ),
+            serializer=RawPCM16Serializer(),
         ),
     )
     await _run_with_transport(transport, label="voice_ws")
