@@ -32,6 +32,9 @@ AGENT_PROMPT = load_agent_prompt()
 OUTPUT_BYTES_PER_MS = 48
 FRAME_BYTES = 960  # 20 ms of PCM16/24 kHz
 PLAYBACK_LEAD_S = 0.06
+# Dialt ends a session whose microphone audio runs 2 s ahead of real time.
+# Stay well inside that so network batching after this bridge cannot reach it.
+UPLINK_BURST_S = 1.0
 logger = logging.getLogger("uvicorn.error")
 
 
@@ -119,9 +122,19 @@ class _Playback:
                 self.queue.task_done()
 
 
-async def _uplink(actor: WebSocket, ws) -> None:
+async def _uplink(actor: WebSocket, provider: asyncio.Future) -> None:
+    """Forward microphone audio no faster than Dialt admits it.
+
+    Reading starts when the actor connects, so audio sent while Dialt is
+    still starting is discarded as it arrives instead of queueing up and
+    being delivered late in one burst. Afterwards a real-time budget drops
+    whatever arrives more than UPLINK_BURST_S ahead of the clock.
+    """
     state = None
     provider_closed = False
+    budget = UPLINK_BURST_S
+    last = time.monotonic()
+    dropped_s = 0.0
     try:
         while True:
             audio = await actor.receive_bytes()
@@ -129,6 +142,22 @@ async def _uplink(actor: WebSocket, ws) -> None:
                 continue
             if len(audio) % 2:
                 raise ValueError("voice_ws requires complete PCM16 samples")
+            now = time.monotonic()
+            budget = min(UPLINK_BURST_S, budget + now - last)
+            last = now
+            if not provider.done():
+                continue
+            ws = provider.result()
+            seconds = len(audio) / 48000
+            if seconds > budget:
+                # The resampler history no longer precedes the next frame.
+                state = None
+                dropped_s += seconds
+                continue
+            budget -= seconds
+            if dropped_s:
+                logger.warning("Dialt uplink dropped %.0f ms of burst audio", dropped_s * 1000)
+                dropped_s = 0.0
             # Keep resampler history across frames; resetting it causes clicks
             # and loses samples at every actor packet boundary.
             converted, state = audioop.ratecv(audio, 2, 1, 24000, 16000, state)
@@ -236,6 +265,16 @@ async def _downlink(ws, playback: _Playback, calls: asyncio.Queue, cancelled: se
 
 async def run_voice_ws_bot(actor_ws: WebSocket) -> None:
     headers = {"Authorization": f"Bearer {os.environ['DIALT_API_KEY']}"}
+    provider: asyncio.Future = asyncio.get_running_loop().create_future()
+    uplink = asyncio.create_task(_uplink(actor_ws, provider))
+    try:
+        await _run(actor_ws, headers, provider, uplink)
+    finally:
+        uplink.cancel()
+        await asyncio.gather(uplink, return_exceptions=True)
+
+
+async def _run(actor_ws: WebSocket, headers: dict, provider: asyncio.Future, uplink: asyncio.Task) -> None:
     async with websockets.connect(DIALT_URL, additional_headers=headers) as ws:
         logger.info("Dialt provider connected tier=%s", DIALT_BRAIN)
         await ws.send(json.dumps(_start()))
@@ -255,11 +294,12 @@ async def run_voice_ws_bot(actor_ws: WebSocket) -> None:
                     logger.info("Dialt session ready tier=%s suppression=false agent_control=true", DIALT_BRAIN)
                     break
 
+        provider.set_result(ws)
         playback = _Playback(actor_ws)
         calls: asyncio.Queue = asyncio.Queue()
         cancelled: set[str] = set()
         tasks = [
-            asyncio.create_task(_uplink(actor_ws, ws)),
+            uplink,
             asyncio.create_task(_downlink(ws, playback, calls, cancelled)),
             asyncio.create_task(playback.run()),
             asyncio.create_task(_tools(ws, calls, cancelled, CallSession())),

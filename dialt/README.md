@@ -35,6 +35,13 @@ continuously to Dialt's 16 kHz and requests 24 kHz output, checking the server's
 `ready` format before sending microphone audio. The shared greeting starts
 the call. Server turn detection is used without an endpointing override.
 
+Dialt ends a session whose microphone audio arrives more than 2 seconds ahead
+of real time. The bridge therefore reads the actor from the moment it connects
+and discards audio sent before `ready`, so a slow startup cannot deliver a
+late backlog in one burst. After `ready` it forwards at most 1 second ahead of
+real time and drops the excess, logging the dropped duration. Audio sent at
+the real-time rate is never dropped.
+
 Output is paced against a monotonic clock in 20 ms slices with a 60 ms lead
 to absorb send/scheduler jitter. Idle playback starts a fresh clock; brief
 queue gaps retain any audio still in flight. Hard interruptions discard locally queued
