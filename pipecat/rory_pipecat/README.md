@@ -101,7 +101,7 @@ used more energy on a month when they used less.
 **Identity is enforced, not judged.** `verify_caller` checks the caller's three
 answers inside the tool and returns a bare boolean; the account it matched
 stays on the `CallSession` and never enters the transcript. That session is
-Pipecat's own per-call state — `PipelineTask(app_resources=CallSession())`,
+Pipecat's own per-call state — `PipelineWorker(app_resources=CallSession())`,
 read back in every handler as `params.app_resources` — so it is scoped to one
 call by the framework rather than by anything this app remembers to do. Every
 tool that touches account data reads its subject from there, so there is no

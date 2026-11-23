@@ -8,7 +8,7 @@ This module is only the Pipecat-shaped wrapper around it:
     dispatch(...)   -> an async handler taking FunctionCallParams
 
 The session travels as Pipecat's ``app_resources``: one object per
-``PipelineTask``, handed to every handler as ``params.app_resources`` and
+``PipelineWorker``, handed to every handler as ``params.app_resources`` and
 absent from the tool schemas the model sees.
 """
 
@@ -17,8 +17,8 @@ from __future__ import annotations
 import asyncio
 from typing import Callable, Dict
 
-from pipecat.adapters.schemas.function_schema import FunctionSchema
-from pipecat.adapters.schemas.tools_schema import ToolsSchema
+from pipecat.adapters.llm.schemas.function_schema import FunctionSchema
+from pipecat.adapters.llm.schemas.tools_schema import ToolsSchema
 from pipecat.services.llm_service import FunctionCallParams
 
 from rory_tools import SCHEMAS, CallSession, dispatch
