@@ -198,7 +198,8 @@ async def _run_with_transport(transport: BaseTransport, label: str) -> None:
         await worker.cancel()
 
     runner = WorkerRunner(handle_sigint=False)
-    await runner.run(worker)
+    await runner.add_workers(worker)
+    await runner.run()
     logger.info(f"[{label}] pipeline finished")
 
 

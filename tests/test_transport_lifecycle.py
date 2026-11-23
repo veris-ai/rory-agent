@@ -139,10 +139,12 @@ def test_pipecat_seeds_assistant_greeting_and_speaks_it_on_connect(monkeypatch):
 
     transport = SimpleNamespace(event_handler=event_handler)
     worker = SimpleNamespace(queue_frames=AsyncMock(), cancel=AsyncMock())
-    async def run(_):
+    async def run():
         await handlers["on_client_connected"](transport, None)
     monkeypatch.setattr(agent, "_build_pipeline_worker", lambda _: worker)
-    monkeypatch.setattr(agent, "WorkerRunner", lambda **kwargs: SimpleNamespace(run=run))
+    monkeypatch.setattr(
+        agent, "WorkerRunner", lambda **kwargs: SimpleNamespace(add_workers=AsyncMock(), run=run)
+    )
     asyncio.run(agent._run_with_transport(transport, "test"))
     frames = worker.queue_frames.await_args.args[0]
     assert len(frames) == 1
