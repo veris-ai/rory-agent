@@ -78,7 +78,7 @@ async def run_peer(monkeypatch, handler, actor):
 @pytest.mark.parametrize("brain", ["fast", "smart"])
 def test_start_audio_conversion_greeting_and_normal_drain(monkeypatch, brain):
     async def scenario():
-        actor = Actor([struct.pack("<3h", 0, 1000, 2000), struct.pack("<3h", 3000, 4000, 5000)])
+        actor = Actor()
         output = b"\x21\x03" * 1200
 
         async def peer(ws):
@@ -97,10 +97,14 @@ def test_start_audio_conversion_greeting_and_normal_drain(monkeypatch, brain):
             assert start["audio"] == {"sr": 16000, "output_sr": 24000, "output_encoding": "pcm16"}
             assert "api_key" not in start
             await send(ws, READY)
-            uplink = await ws.recv() + await ws.recv()
-            assert struct.unpack("<4h", uplink) == (0, 1500, 3000, 4500)
             await send(ws, {"type": "turn", "turn_id": "greeting"})
             await ws.send(output)
+            # Microphone audio is forwarded only once the session is ready.
+            await actor.first_audio.wait()
+            actor.incoming.put_nowait(struct.pack("<3h", 0, 1000, 2000))
+            actor.incoming.put_nowait(struct.pack("<3h", 3000, 4000, 5000))
+            uplink = await ws.recv() + await ws.recv()
+            assert struct.unpack("<4h", uplink) == (0, 1500, 3000, 4500)
             # Closing immediately must not drop queued greeting audio.
 
         monkeypatch.setattr(agent, "DIALT_BRAIN", brain)
@@ -570,5 +574,44 @@ def test_committed_write_errors_are_unknown_not_failed(monkeypatch, failure):
             assert result["verified"] is (failure is None)
 
         await run_peer(monkeypatch, peer, Actor())
+
+    asyncio.run(scenario())
+
+
+def test_microphone_backlog_and_bursts_stay_inside_dialt_admission(monkeypatch):
+    """Dialt ends a session whose microphone runs 2 s ahead of real time."""
+    async def scenario():
+        frame = 960  # 20 ms of PCM16/24 kHz
+        # Three seconds arrive before Dialt is ready, as during a slow startup.
+        actor = Actor([struct.pack("<h", -7000) * (frame // 2)] * 150)
+        received = bytearray()
+
+        async def collect(ws):
+            try:
+                while True:
+                    received.extend(await asyncio.wait_for(ws.recv(), .2))
+            except TimeoutError:
+                pass
+
+        async def peer(ws):
+            await receive_json(ws)
+            await send(ws, READY)
+            await send(ws, {"type": "turn", "turn_id": "greeting"})
+            await ws.send(b"\x00\x01" * 480)
+            await actor.first_audio.wait()
+            # Three more seconds arrive at once, as after a stalled sender.
+            for _ in range(150):
+                actor.incoming.put_nowait(struct.pack("<h", 2000) * (frame // 2))
+            await collect(ws)
+            samples = struct.unpack(f"<{len(received) // 2}h", received)
+            assert min(samples) >= 0, "audio from before ready reached Dialt"
+            assert .9 <= len(samples) / 16000 <= 1.2
+            # Admission recovers at real time; later speech is not lost.
+            received.clear()
+            actor.incoming.put_nowait(struct.pack("<h", 3000) * (frame // 2))
+            await collect(ws)
+            assert len(received) == 640 and max(struct.unpack("<320h", received)) == 3000
+
+        await run_peer(monkeypatch, peer, actor)
 
     asyncio.run(scenario())
