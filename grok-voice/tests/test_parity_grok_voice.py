@@ -14,11 +14,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from rory_tools import SCHEMAS
+from rory_tools.prompt import GREETING, load_agent_prompt
 from rory_tools.parity import (
     assert_argument_schemas_match,
     assert_description_matches,
     assert_required_arguments_match,
-    assert_shares_prompt_and_greeting,
     assert_tool_names_match,
     assert_uses_shared_dispatcher,
 )
@@ -47,8 +47,14 @@ def test_argument_schemas_match(schema):
     assert_argument_schemas_match(SURFACE, schema)
 
 
-def test_prompt_and_greeting_are_the_shared_ones():
-    assert_shares_prompt_and_greeting(agent)
+def test_prompt_differs_from_the_shared_one_only_in_the_account_format():
+    shared = load_agent_prompt()
+    assert agent.AGENT_PROMPT != shared
+    assert agent.AGENT_PROMPT == shared.replace(agent.SHARED_ACCOUNT_FORMAT, agent.GROK_ACCOUNT_FORMAT)
+
+
+def test_greeting_is_the_shared_one():
+    assert agent.GREETING is GREETING
 
 
 def test_tool_calls_go_through_the_shared_gate():
@@ -68,11 +74,18 @@ def test_session_keeps_grok_shape():
     session = agent._session_update()["session"]
     assert session["voice"] == agent.GROK_VOICE
     assert session["instructions"].startswith(agent.AGENT_PROMPT)
-    assert session["turn_detection"]["silence_duration_ms"] == 800
+    assert session["turn_detection"] == {"type": "server_vad"}
     assert session["audio"]["input"]["transcription"] == {"model": "grok-transcribe"}
     assert session["audio"]["input"]["format"]["rate"] == agent.SAMPLE_RATE_HZ
     assert session["audio"]["output"]["format"]["rate"] == agent.SAMPLE_RATE_HZ
     assert session["tools"] is tools.TOOLS
+
+
+def test_greeting_is_a_force_message_with_the_shared_text():
+    item = agent._greeting()["item"]
+    assert item["type"] == "force_message"
+    assert item["role"] == "assistant"
+    assert item["content"] == [{"type": "output_text", "text": agent.GREETING}]
 
 
 def test_candidate_fails_closed_without_its_credential():
