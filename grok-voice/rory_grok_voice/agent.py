@@ -385,17 +385,10 @@ async def _pump_grok_to_actor(gk_ws, actor_ws: WebSocket, session_state: CallSes
                     )
 
             elif etype == "error":
-                error = evt.get("error") or {}
-                if error.get("code") == "conversation_already_has_active_response":
-                    # Server VAD started a response while the caller spoke during a
-                    # tool round, and our post-tool response.create collided with it.
-                    # The function_call_output items are already in the conversation,
-                    # so the response in flight consumes them. The Realtime transport
-                    # sees this on live calls; Grok speaks the same protocol.
-                    logger.warning("[gk->a] response.create collided with an active response — continuing")
-                    continue
-                logger.error(f"[gk->a] Grok realtime error: {error}")
-                raise RuntimeError(f"Grok realtime error: {error}")
+                # xAI documents most errors as recoverable, with the session
+                # left open. A session that is really over closes its websocket,
+                # which ends this loop.
+                logger.error(f"[gk->a] Grok realtime error: {evt.get('error')}")
     except websockets.ConnectionClosed as exc:
         logger.info(
             f"[gk->a] Grok WS closed code={exc.code} reason={exc.reason}; "
