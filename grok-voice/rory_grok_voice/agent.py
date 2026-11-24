@@ -19,9 +19,9 @@ and input transcription events are only emitted when
 ``audio.input.transcription.model`` names ``grok-transcribe``.
 
 Everything below the transport is shared with the other candidates — same
-prompt, same greeting, same frozen-clock date context, same tools, same
-dispatcher. They exist to be compared, so the transport is the only thing
-allowed to differ.
+greeting, same frozen-clock date context, same tools, same dispatcher, and the
+same prompt apart from one sentence on how callers may say an account number
+(``GROK_ACCOUNT_FORMAT``).
 
 Sample-rate note: the Veris actor speaks and listens at 24 kHz PCM16, and Grok
 accepts and emits 24 kHz PCM16, so neither leg is resampled.
@@ -67,7 +67,23 @@ AUTO_RESPONSE_GRACE_S = 2.5
 # The longest a finished tool round waits on a caller who is still talking.
 TOOL_CONTINUE_TIMEOUT_S = 10.0
 
-AGENT_PROMPT = load_agent_prompt()
+# Grok read the shared sentence as a rule for how callers must speak, and asked
+# them to repeat correct numbers. The lookup still needs the dashed form.
+SHARED_ACCOUNT_FORMAT = "an account number is 4 digits, a dash, then 5."
+GROK_ACCOUNT_FORMAT = (
+    "callers may read an account number with or without the dash; "
+    "send it to verify_caller as 4 digits, a dash, then 5."
+)
+
+
+def _load_grok_prompt() -> str:
+    prompt = load_agent_prompt()
+    if SHARED_ACCOUNT_FORMAT not in prompt:
+        raise RuntimeError("the shared prompt no longer has the account-format sentence")
+    return prompt.replace(SHARED_ACCOUNT_FORMAT, GROK_ACCOUNT_FORMAT)
+
+
+AGENT_PROMPT = _load_grok_prompt()
 
 
 def _session_update() -> dict:

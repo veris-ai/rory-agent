@@ -14,11 +14,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from rory_tools import SCHEMAS
+from rory_tools.prompt import GREETING, load_agent_prompt
 from rory_tools.parity import (
     assert_argument_schemas_match,
     assert_description_matches,
     assert_required_arguments_match,
-    assert_shares_prompt_and_greeting,
     assert_tool_names_match,
     assert_uses_shared_dispatcher,
 )
@@ -47,8 +47,14 @@ def test_argument_schemas_match(schema):
     assert_argument_schemas_match(SURFACE, schema)
 
 
-def test_prompt_and_greeting_are_the_shared_ones():
-    assert_shares_prompt_and_greeting(agent)
+def test_prompt_differs_from_the_shared_one_only_in_the_account_format():
+    shared = load_agent_prompt()
+    assert agent.AGENT_PROMPT != shared
+    assert agent.AGENT_PROMPT == shared.replace(agent.SHARED_ACCOUNT_FORMAT, agent.GROK_ACCOUNT_FORMAT)
+
+
+def test_greeting_is_the_shared_one():
+    assert agent.GREETING is GREETING
 
 
 def test_tool_calls_go_through_the_shared_gate():
