@@ -45,7 +45,7 @@ from rory_tools.prompt import GREETING, load_agent_prompt, today_context
 
 from .tools import TOOLS
 
-GROK_MODEL = os.environ.get("GROK_VOICE_MODEL", "grok-voice-think-fast-2.0")
+GROK_MODEL = os.environ.get("GROK_VOICE_MODEL", "grok-voice-3.0")
 GROK_URL = f"wss://api.x.ai/v1/realtime?model={GROK_MODEL}"
 GROK_VOICE = os.environ.get("GROK_VOICE", "eve")
 

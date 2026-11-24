@@ -3,7 +3,7 @@
 Rory on xAI's Grok speech-to-speech API. Transport only — the tools, vendor
 clients and prompt live in rory-core.
 
-One `grok-voice-think-fast-2.0` realtime websocket per call: the model listens,
+One `grok-voice-3.0` realtime websocket per call: the model listens,
 reasons, calls Rory's tools and speaks inside that one session. The pod bridges
 the Veris actor's PCM16 to it, runs each tool call locally through the shared
 dispatcher, and posts the result back on the same socket. Nothing dials in.
@@ -101,7 +101,7 @@ transport's tool calls too.
 | Variable | Default | Role |
 |---|---|---|
 | `XAI_API_KEY` | — | Required. |
-| `GROK_VOICE_MODEL` | `grok-voice-think-fast-2.0` | The speech-to-speech model in the websocket URL. |
+| `GROK_VOICE_MODEL` | `grok-voice-3.0` | The speech-to-speech model in the websocket URL. |
 | `GROK_VOICE` | `eve` | Voice name. |
 | `STRIPE_API_KEY` | — | Sandbox fixture; the billing twin's credential. |
 | `FINERACT_USER` / `FINERACT_PASSWORD` / `FINERACT_TENANT` | `mifos` / `password` / `default` | Fineract's public OSS defaults. |
