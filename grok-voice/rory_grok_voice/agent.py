@@ -103,6 +103,18 @@ def _session_update() -> dict:
     }
 
 
+def _greeting() -> dict:
+    """The opening line, spoken word for word without calling the model."""
+    return {
+        "type": "conversation.item.create",
+        "item": {
+            "type": "force_message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": GREETING}],
+        },
+    }
+
+
 async def run_voice_ws_bot(actor_ws: WebSocket) -> None:
     """One actor connection ↔ one Grok realtime session with Rory's tools.
 
@@ -127,20 +139,10 @@ async def run_voice_ws_bot(actor_ws: WebSocket) -> None:
                 f"[voice] session.update sent: {len(TOOLS)} tools, "
                 f"instructions={len(AGENT_PROMPT)} chars"
             )
-            # Agent speaks first. The system prompt tells the model the greeting
-            # already happened, so force it on this opening turn with
-            # per-response instructions, which override the session
-            # instructions for that one response.
-            await gk_ws.send(json.dumps({
-                "type": "response.create",
-                "response": {
-                    "instructions": (
-                        "Open the call by greeting the caller now. Say exactly: "
-                        f'"{GREETING}" Then stop and wait for the caller to respond.'
-                    ),
-                },
-            }))
-            logger.info("[voice] sent greeting trigger (agent greets first)")
+            # Agent speaks first. force_message is its own turn, so no
+            # response.create follows it.
+            await gk_ws.send(json.dumps(_greeting()))
+            logger.info("[voice] sent greeting as force_message")
 
             up = asyncio.create_task(_pump_actor_to_grok(actor_ws, gk_ws), name="actor->gk")
             down = asyncio.create_task(

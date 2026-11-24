@@ -75,6 +75,13 @@ def test_session_keeps_grok_shape():
     assert session["tools"] is tools.TOOLS
 
 
+def test_greeting_is_a_force_message_with_the_shared_text():
+    item = agent._greeting()["item"]
+    assert item["type"] == "force_message"
+    assert item["role"] == "assistant"
+    assert item["content"] == [{"type": "output_text", "text": agent.GREETING}]
+
+
 def test_candidate_fails_closed_without_its_credential():
     """A missing key must stop the boot, not each call.
 
