@@ -84,13 +84,8 @@ def _session_update() -> dict:
             # turn_detection at the session's top level rather than under audio.
             "voice": GROK_VOICE,
             "instructions": f"{AGENT_PROMPT}\n\n{today_context()}",
-            # Turn-taking parity with the other candidates: ~0.8 s of
-            # end-of-turn silence. threshold and prefix_padding_ms stay on
-            # xAI's tuned defaults — the values Realtime pins are OpenAI's.
-            "turn_detection": {
-                "type": "server_vad",
-                "silence_duration_ms": 800,
-            },
+            # xAI's own end-of-turn detection, with nothing pinned.
+            "turn_detection": {"type": "server_vad"},
             "audio": {
                 "input": {
                     "format": {"type": "audio/pcm", "rate": SAMPLE_RATE_HZ},

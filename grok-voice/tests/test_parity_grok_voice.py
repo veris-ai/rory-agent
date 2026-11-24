@@ -68,7 +68,7 @@ def test_session_keeps_grok_shape():
     session = agent._session_update()["session"]
     assert session["voice"] == agent.GROK_VOICE
     assert session["instructions"].startswith(agent.AGENT_PROMPT)
-    assert session["turn_detection"]["silence_duration_ms"] == 800
+    assert session["turn_detection"] == {"type": "server_vad"}
     assert session["audio"]["input"]["transcription"] == {"model": "grok-transcribe"}
     assert session["audio"]["input"]["format"]["rate"] == agent.SAMPLE_RATE_HZ
     assert session["audio"]["output"]["format"]["rate"] == agent.SAMPLE_RATE_HZ
