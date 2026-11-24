@@ -317,12 +317,15 @@ async def _pump_grok_to_actor(gk_ws, actor_ws: WebSocket, session_state: CallSes
                 items.clear()
                 forwarded_transcripts.clear()
                 forwarded_count = 0
-                logger.info(f"[gk->a] response.created #{n_responses}")
+                logger.info(
+                    f"[gk->a] response.created #{n_responses} id={(evt.get('response') or {}).get('id')}"
+                )
 
             elif etype == "response.function_call_arguments.done":
                 name = evt["name"]
                 call_id = evt["call_id"]
                 raw_args = evt.get("arguments") or "{}"
+                logger.info(f"[gk->a] tool args done {name} ({call_id}) response={evt.get('response_id')}")
                 # Arguments arrive as a JSON string; a no-argument tool can
                 # arrive with it empty. When server VAD cancels the response
                 # mid-generation (caller or background noise spoke over it), the
@@ -358,7 +361,19 @@ async def _pump_grok_to_actor(gk_ws, actor_ws: WebSocket, session_state: CallSes
                     },
                 }))
 
+            elif etype == "conversation.item.truncated":
+                logger.info(
+                    f"[gk->a] item {evt.get('item_id')} truncated at "
+                    f"audio_end_ms={evt.get('audio_end_ms')}"
+                )
+
             elif etype == "response.done":
+                response = evt.get("response") or {}
+                output_types = [item.get("type") for item in response.get("output") or []]
+                logger.info(
+                    f"[gk->a] response.done id={response.get('id')} "
+                    f"status={response.get('status')} output={output_types}"
+                )
                 if pending_tool_response:
                     pending_tool_response = False
                     logger.info("[gk->a] response.done after tool — kicking next response.create")
