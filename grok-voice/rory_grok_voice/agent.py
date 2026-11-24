@@ -54,6 +54,12 @@ SAMPLE_RATE_HZ = 24000
 # Roughly one heartbeat per second at 20 ms frames.
 LOG_EVERY_N_FRAMES = 50
 
+# After a tool round, how long server VAD gets to answer a caller who just
+# finished speaking before the bridge asks for the response itself.
+AUTO_RESPONSE_GRACE_S = 2.5
+# The longest a finished tool round waits on a caller who is still talking.
+TOOL_CONTINUE_TIMEOUT_S = 10.0
+
 AGENT_PROMPT = load_agent_prompt()
 
 
@@ -183,8 +189,115 @@ async def _pump_actor_to_grok(actor_ws: WebSocket, gk_ws) -> None:
         raise
 
 
+class _TurnState:
+    """What the Grok reader has seen, for the tool worker to act on."""
+
+    def __init__(self) -> None:
+        self.responses_started = 0
+        self.response_active = False
+        self.caller_speaking = False
+        self.caller_stopped_at = 0.0
+        self.changed = asyncio.Event()
+
+    def touch(self) -> None:
+        self.changed.set()
+
+
+async def _run_tool(call: dict, session_state: CallSession) -> dict:
+    """One tool call. Every call gets an output, or Grok waits on it forever."""
+    try:
+        args = json.loads(call["arguments"] or "{}")
+    except json.JSONDecodeError:
+        logger.warning(
+            f"[gk->a] tool {call['name']} ({call['call_id']}) has invalid JSON arguments: "
+            f"{call['arguments']!r}"
+        )
+        return {"error": "the tool call's arguments were not valid JSON"}
+    # Every vendor client is blocking, so it runs on a worker thread. Awaiting
+    # it here keeps a round's calls sequential: they share account state.
+    return await asyncio.to_thread(dispatch, session_state, call["name"], args)
+
+
+async def _continue_after_tools(gk_ws, turn: _TurnState, rounds: asyncio.Queue) -> None:
+    """Ask for the next response once, unless another response will use the outputs.
+
+    If the caller spoke during the tool round, server VAD starts its own response
+    and that response reads the outputs. A second ``response.create`` would
+    collide with it, so the bridge only asks when no such response arrives.
+    """
+    outputs_sent_at = turn.responses_started
+    deadline = time.monotonic() + TOOL_CONTINUE_TIMEOUT_S
+    while True:
+        if turn.responses_started > outputs_sent_at or not rounds.empty():
+            return
+        now = time.monotonic()
+        timeout = None
+        if not turn.response_active:
+            if now >= deadline:
+                break
+            wake_at = deadline
+            if not turn.caller_speaking:
+                grace_ends = turn.caller_stopped_at + AUTO_RESPONSE_GRACE_S
+                if now >= grace_ends:
+                    break
+                wake_at = min(deadline, grace_ends)
+            timeout = wake_at - now
+        turn.changed.clear()
+        try:
+            await asyncio.wait_for(turn.changed.wait(), timeout)
+        except TimeoutError:
+            pass
+    logger.info("[gk->a] tool outputs sent — response.create")
+    await gk_ws.send(json.dumps({"type": "response.create"}))
+
+
+async def _run_tool_rounds(
+    rounds: asyncio.Queue, gk_ws, session_state: CallSession, turn: _TurnState
+) -> None:
+    """Runs tool rounds off the reader, so a slow tool never stalls Grok's events."""
+    try:
+        while True:
+            calls = await rounds.get()
+            for call in calls:
+                result = await _run_tool(call, session_state)
+                logger.info(
+                    f"[gk->a] tool {call['name']} ({call['call_id']}) -> "
+                    f"{json.dumps(result, default=str)}"
+                )
+                await gk_ws.send(json.dumps({
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "function_call_output",
+                        "call_id": call["call_id"],
+                        "output": json.dumps(result, default=str),
+                    },
+                }))
+            await _continue_after_tools(gk_ws, turn, rounds)
+    except websockets.ConnectionClosed as exc:
+        logger.info(f"[gk->a] Grok WS closed during a tool round: code={exc.code}")
+
+
 async def _pump_grok_to_actor(gk_ws, actor_ws: WebSocket, session_state: CallSession) -> None:
-    """Grok events → audio bytes back to the actor; dispatch tool calls.
+    """Reads Grok's events and runs its tool calls until either side ends."""
+    turn = _TurnState()
+    rounds: asyncio.Queue = asyncio.Queue()
+    tasks = {
+        asyncio.create_task(_read_grok(gk_ws, actor_ws, turn, rounds), name="gk-reader"),
+        asyncio.create_task(_run_tool_rounds(rounds, gk_ws, session_state, turn), name="gk-tools"),
+    }
+    try:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _read_grok(gk_ws, actor_ws: WebSocket, turn: _TurnState, rounds: asyncio.Queue) -> None:
+    """Grok events → audio bytes back to the actor; tool calls → the worker.
 
     The first output item of each response is forwarded delta-by-delta as the
     model generates it, so the actor hears the reply onset immediately and
@@ -196,11 +309,10 @@ async def _pump_grok_to_actor(gk_ws, actor_ws: WebSocket, session_state: CallSes
     doing it; keeping the guard costs nothing on the one-item-per-response path,
     which streams with zero buffering.
 
-    A function call's output goes back as a ``function_call_output`` item; the
-    model does not resume on its own, so ``response.done`` after a tool turn
-    kicks the next ``response.create``.
+    A function call is queued only once its response completes. A response the
+    caller cancelled never runs its tools.
     """
-    pending_tool_response = False
+    calls_by_response: dict[str | None, list[dict]] = {}
     n_audio_frames = 0
     n_audio_bytes = 0
     n_responses = 0
@@ -304,15 +416,23 @@ async def _pump_grok_to_actor(gk_ws, actor_ws: WebSocket, session_state: CallSes
 
             elif etype == "input_audio_buffer.speech_started":
                 logger.info("[gk->a] vad: speech_started")
+                turn.caller_speaking = True
+                turn.touch()
 
             elif etype == "input_audio_buffer.speech_stopped":
                 logger.info("[gk->a] vad: speech_stopped")
+                turn.caller_speaking = False
+                turn.caller_stopped_at = time.monotonic()
+                turn.touch()
 
             elif etype == "input_audio_buffer.committed":
                 logger.info("[gk->a] vad: buffer committed -> response generation")
 
             elif etype == "response.created":
                 n_responses += 1
+                turn.responses_started += 1
+                turn.response_active = True
+                turn.touch()
                 live_item_id = None
                 items.clear()
                 forwarded_transcripts.clear()
@@ -322,44 +442,15 @@ async def _pump_grok_to_actor(gk_ws, actor_ws: WebSocket, session_state: CallSes
                 )
 
             elif etype == "response.function_call_arguments.done":
-                name = evt["name"]
-                call_id = evt["call_id"]
-                raw_args = evt.get("arguments") or "{}"
-                logger.info(f"[gk->a] tool args done {name} ({call_id}) response={evt.get('response_id')}")
-                # Arguments arrive as a JSON string; a no-argument tool can
-                # arrive with it empty. When server VAD cancels the response
-                # mid-generation (caller or background noise spoke over it), the
-                # event still arrives, carrying the arguments cut off wherever
-                # generation stopped. That call was never completed by the model,
-                # so it is not dispatched; the cancelled response's own
-                # response.done follows and the model retries on the next turn.
-                # Same failure the Realtime transport handles.
-                try:
-                    args = json.loads(raw_args)
-                except json.JSONDecodeError:
-                    logger.warning(
-                        f"[gk->a] tool {name} ({call_id}) cancelled mid-generation, "
-                        f"arguments truncated — not dispatched: {raw_args!r}"
-                    )
-                    continue
-                pending_tool_response = True
-                # Every vendor client is blocking, and this coroutine is
-                # carrying the caller's audio. Called inline, a ten-second
-                # vendor timeout is ten seconds of dead air — the same reason
-                # the Pipecat handler hops threads. Awaiting here also keeps
-                # tool calls sequential: they share account state.
-                result = await asyncio.to_thread(dispatch, session_state, name, args)
                 logger.info(
-                    f"[gk->a] tool {name} ({call_id}) -> {json.dumps(result, default=str)}"
+                    f"[gk->a] tool args done {evt['name']} ({evt['call_id']}) "
+                    f"response={evt.get('response_id')}"
                 )
-                await gk_ws.send(json.dumps({
-                    "type": "conversation.item.create",
-                    "item": {
-                        "type": "function_call_output",
-                        "call_id": call_id,
-                        "output": json.dumps(result, default=str),
-                    },
-                }))
+                calls_by_response.setdefault(evt.get("response_id"), []).append({
+                    "name": evt["name"],
+                    "call_id": evt["call_id"],
+                    "arguments": evt.get("arguments"),
+                })
 
             elif etype == "conversation.item.truncated":
                 logger.info(
@@ -369,20 +460,27 @@ async def _pump_grok_to_actor(gk_ws, actor_ws: WebSocket, session_state: CallSes
 
             elif etype == "response.done":
                 response = evt.get("response") or {}
+                status = response.get("status")
                 output_types = [item.get("type") for item in response.get("output") or []]
                 logger.info(
-                    f"[gk->a] response.done id={response.get('id')} "
-                    f"status={response.get('status')} output={output_types}"
+                    f"[gk->a] response.done id={response.get('id')} status={status} "
+                    f"output={output_types} — {forwarded_count} item(s) forwarded; "
+                    f"session totals {n_audio_frames} frames / {n_audio_bytes} bytes"
                 )
-                if pending_tool_response:
-                    pending_tool_response = False
-                    logger.info("[gk->a] response.done after tool — kicking next response.create")
-                    await gk_ws.send(json.dumps({"type": "response.create"}))
-                else:
-                    logger.info(
-                        f"[gk->a] response.done — {forwarded_count} item(s) forwarded; "
-                        f"session totals {n_audio_frames} frames / {n_audio_bytes} bytes"
-                    )
+                calls = calls_by_response.pop(response.get("id"), [])
+                if status == "completed":
+                    if len(calls) != output_types.count("function_call"):
+                        logger.warning(
+                            f"[gk->a] response {response.get('id')} listed "
+                            f"{output_types.count('function_call')} function calls, "
+                            f"received arguments for {len(calls)}"
+                        )
+                    if calls:
+                        rounds.put_nowait(calls)
+                elif calls:
+                    logger.info(f"[gk->a] {len(calls)} tool call(s) not run: response {status}")
+                turn.response_active = False
+                turn.touch()
 
             elif etype == "error":
                 # xAI documents most errors as recoverable, with the session
