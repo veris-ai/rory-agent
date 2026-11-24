@@ -20,71 +20,38 @@ directions, so this transport is the Realtime one with two deltas in
   `grok-transcribe`. Without it the caller's side of the call never reaches
   the log or the trace.
 
-Endpointing is pinned to 800 ms of end-of-turn silence like every other Rory
-transport; `threshold` and `prefix_padding_ms` stay on xAI's defaults rather
-than borrowing OpenAI's numbers. Both legs run at the actor's 24 kHz, so no
-audio is resampled.
+End-of-turn detection stays on xAI's `server_vad` default with nothing pinned,
+unlike the other Rory transports, which pin 800 ms of silence. Both legs run at
+the actor's 24 kHz, so no audio is resampled.
 
 ## Barge-in
 
-Grok ignores `conversation.item.truncate` on an item whose response is still
-generating, which can make it look unimplemented. On a settled item truncate
-works, and on a barge-in Grok settles the item itself before it reports the
-speech, so the bridge has nothing to send. Probed against
-`grok-voice-think-fast-2.0` with the bridge's session shape (server VAD,
-`silence_duration_ms: 800`, PCM16 24 kHz both ways).
+Grok generates audio faster than real time, and the `voice_ws` protocol cannot
+take audio back once it is sent. So the bridge holds agent audio and sends it to
+the actor at the rate it is spoken. On `input_audio_buffer.speech_started` it
+drops what it has not sent and sends `conversation.item.truncate` with
+`audio_end_ms` at the amount it did send, so the model's context matches what
+the caller heard.
 
-**Truncate on a settled item works.** Count to twenty, `response.cancel`
-after 2630 ms of audio, `response.done` with `status: "cancelled"`, then
-`conversation.item.truncate {item_id, content_index: 0, audio_end_ms: 2630}`
-→ `conversation.item.truncated {item_id, transcript: " One. Two. Three.",
-content_index: 0, audio_end_ms: 2630}`. Asked to repeat exactly what it had
-said: "One. Two. Three." The model's context is cut at the truncate point.
+## Tool calls
 
-**Under server VAD Grok stops the response itself, before `speech_started`.**
-Five runs: caller speech (2 s of real speech PCM) streamed into
-`input_audio_buffer.append` at real time while a count to one hundred was in
-flight. The order was identical every time:
+Tools run in a worker, so a slow tool never stops the bridge reading Grok's
+events. Only a response that finishes with `status: "completed"` runs its tools.
+Every `call_id` gets a `function_call_output`, including calls with invalid JSON.
 
-1. `response.output_audio.delta` … (Grok streams ~2.5× faster than real time)
-2. `response.done` for the count — `status: "completed"`, `output: []`, no
-   `output_audio.done` / `output_item.done` / `transcript.done` for the item,
-   `usage.output_audio_seconds` equal to the audio delivered so far
-3. `input_audio_buffer.speech_started` — same read as the `response.done`,
-   ~1.8–2.2 s after the caller's speech began
-4. `conversation.item.added` (user item), `…input_audio_transcription.updated`
-5. `response.created` for the barge-in turn, ~2 s later
-6. `input_audio_buffer.speech_stopped`, `input_audio_buffer.committed`
+Once all outputs are sent and the current audio has played, the bridge sends one
+`response.create`. If the caller spoke during the round, server VAD's own
+response uses the outputs, and the bridge only asks if no such response arrives.
 
-Grok never emitted `status: "cancelled"` on its own, and the model's context
-ended where generation stopped: asked afterwards to repeat the numbers it had
-said, it gave the first seven for ~6.8 s of delivered audio.
+`error` events are logged and do not end the call. A session that is really over
+closes its websocket.
 
-**Truncate at the forwarded length is a silent no-op.** The Realtime
-transport sends truncate on `speech_started` with
-`audio_end_ms` = bytes forwarded to the actor. This bridge forwards every
-delta, so forwarded = delivered = where Grok stopped generating; that truncate,
-sent at `speech_started`, drew no `conversation.item.truncated` and no
-`error`, and the follow-up recalled the same seven numbers as with no
-truncate. Under Grok's ordering the Realtime block would also never fire:
-`response.done` clears the live item one event before `speech_started`.
+## Prompt and greeting
 
-**Truncate below the delivered length at `speech_started` works** —
-`audio_end_ms: 3000` → `conversation.item.truncated {transcript: " One...
-two... three... four"}`, follow-up "One... two... three... four". It is only
-useful for a client that stops playout before the delivered audio, which the
-actor does not; the Realtime transport rests on the same assumption.
-
-**Truncate targets the latest assistant item, whatever `item_id` says.** The
-same 3000 ms truncate sent after the barge-in reply had completed returned
-`conversation.item.truncated` echoing the count item's id but with the
-reply's transcript cut (`" Hello, sorry to interrupt, I have a question
-about"`), and the follow-up repeated the reply. A truncate, if ever needed,
-must go out on `speech_started`, before the barge-in turn's item exists.
-
-xAI's docs list neither `response.cancel` nor `conversation.item.truncate`
-in their supported or unsupported event tables; the behaviour above is
-observed, not documented.
+The greeting is a `force_message`, so it is spoken word for word without calling
+the model. The prompt is the shared one with one sentence changed: callers may
+read an account number with or without the dash, and the agent still sends it to
+`verify_caller` in the dashed form the lookup needs.
 
 ## Running it
 
@@ -112,6 +79,8 @@ transport's tool calls too.
 cd .. && uv run pytest -q grok-voice/tests
 ```
 
-`test_parity_grok_voice.py` runs the shared parity assertions, pins the two
-session-shape deltas above, and checks the container fails closed at boot
-without `XAI_API_KEY`.
+`test_parity_grok_voice.py` runs the shared parity assertions, pins the
+session shape and the one prompt difference, and checks the container fails
+closed at boot without `XAI_API_KEY`. `test_cancelled_tool_call_grok_voice.py`
+covers the tool round and `test_barge_in_grok_voice.py` covers playout and
+truncation.
