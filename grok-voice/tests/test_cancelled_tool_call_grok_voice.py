@@ -208,9 +208,10 @@ def test_slow_tool_does_not_block_the_reader(monkeypatch):
         rounds: asyncio.Queue = asyncio.Queue()
         events = [_created("r1"), _args("r1", "call_1", "get_account", "{}"), _done("r1", "completed", 1)]
         gk_ws = FakeGrok(events, settle_s=0.2)
-        worker = asyncio.create_task(agent._run_tool_rounds(rounds, gk_ws, CallSession(), turn))
+        playout = agent._Playout(AsyncMock())
+        worker = asyncio.create_task(agent._run_tool_rounds(rounds, gk_ws, CallSession(), turn, playout))
         events.append({"type": "input_audio_buffer.speech_started"})
-        reader = asyncio.create_task(agent._read_grok(gk_ws, AsyncMock(), turn, rounds))
+        reader = asyncio.create_task(agent._read_grok(gk_ws, playout, turn, rounds))
         while not turn.caller_speaking:
             await asyncio.sleep(0.005)
         read_while_tool_ran = not release.is_set()

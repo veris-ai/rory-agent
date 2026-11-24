@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import collections
 import json
 import os
 import time
@@ -50,6 +51,12 @@ GROK_VOICE = os.environ.get("GROK_VOICE", "eve")
 
 # The Veris actor and Grok both run PCM16 at 24 kHz.
 SAMPLE_RATE_HZ = 24000
+PCM16_BYTES_PER_MS = SAMPLE_RATE_HZ * 2 // 1000
+
+# Agent audio goes to the actor in 20 ms frames at the rate it is spoken, kept
+# this far ahead of real time so network jitter never starves playback.
+PLAYOUT_CHUNK_BYTES = 20 * PCM16_BYTES_PER_MS
+PLAYOUT_LEAD_S = 0.1
 
 # Roughly one heartbeat per second at 20 ms frames.
 LOG_EVERY_N_FRAMES = 50
@@ -189,6 +196,71 @@ async def _pump_actor_to_grok(actor_ws: WebSocket, gk_ws) -> None:
         raise
 
 
+class _Playout:
+    """Agent audio on its way to the actor, sent at the rate it is spoken.
+
+    Grok generates audio faster than real time, and the voice_ws protocol cannot
+    take audio back once it is sent. Holding it here is what lets a barge-in stop
+    the words the caller has not heard yet.
+    """
+
+    def __init__(self, actor_ws: WebSocket) -> None:
+        self._actor_ws = actor_ws
+        self._segments: collections.deque[tuple[str, bytearray]] = collections.deque()
+        self._sent_bytes: collections.Counter[str] = collections.Counter()
+        self._stopped_items: set[str] = set()
+        self._has_audio = asyncio.Event()
+        self._drained = asyncio.Event()
+        self._drained.set()
+
+    def write(self, item_id: str, audio: bytes) -> None:
+        if not audio or item_id in self._stopped_items:
+            return
+        if self._segments and self._segments[-1][0] == item_id:
+            self._segments[-1][1].extend(audio)
+        else:
+            self._segments.append((item_id, bytearray(audio)))
+        self._drained.clear()
+        self._has_audio.set()
+
+    def interrupt(self) -> tuple[str, int] | None:
+        """Drops unsent audio; returns the item cut off and the ms of it already sent."""
+        if not self._segments:
+            return None
+        item_id = self._segments[0][0]
+        self._stopped_items.update(segment[0] for segment in self._segments)
+        self._segments.clear()
+        self._drained.set()
+        return item_id, self._sent_bytes[item_id] // PCM16_BYTES_PER_MS
+
+    async def drained(self) -> None:
+        await self._drained.wait()
+
+    async def run(self) -> None:
+        loop = asyncio.get_running_loop()
+        playhead = 0.0
+        try:
+            while True:
+                if not self._segments:
+                    self._drained.set()
+                    self._has_audio.clear()
+                    await self._has_audio.wait()
+                    continue
+                item_id, audio = self._segments[0]
+                chunk = bytes(audio[:PLAYOUT_CHUNK_BYTES])
+                del audio[:PLAYOUT_CHUNK_BYTES]
+                if not audio:
+                    self._segments.popleft()
+                self._sent_bytes[item_id] += len(chunk)
+                playhead = max(playhead, loop.time()) + len(chunk) / PCM16_BYTES_PER_MS / 1000
+                await self._actor_ws.send_bytes(chunk)
+                delay = playhead - PLAYOUT_LEAD_S - loop.time()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+        except WebSocketDisconnect:
+            logger.info("[gk->a] actor WS closed; ending playout")
+
+
 class _TurnState:
     """What the Grok reader has seen, for the tool worker to act on."""
 
@@ -218,14 +290,18 @@ async def _run_tool(call: dict, session_state: CallSession) -> dict:
     return await asyncio.to_thread(dispatch, session_state, call["name"], args)
 
 
-async def _continue_after_tools(gk_ws, turn: _TurnState, rounds: asyncio.Queue) -> None:
+async def _continue_after_tools(
+    gk_ws, turn: _TurnState, rounds: asyncio.Queue, playout: _Playout
+) -> None:
     """Ask for the next response once, unless another response will use the outputs.
 
-    If the caller spoke during the tool round, server VAD starts its own response
+    xAI's documented sequence: send the outputs, let the current turn's audio
+    finish playing, then request the response. If the caller spoke during the tool round, server VAD starts its own response
     and that response reads the outputs. A second ``response.create`` would
     collide with it, so the bridge only asks when no such response arrives.
     """
     outputs_sent_at = turn.responses_started
+    await playout.drained()
     deadline = time.monotonic() + TOOL_CONTINUE_TIMEOUT_S
     while True:
         if turn.responses_started > outputs_sent_at or not rounds.empty():
@@ -252,7 +328,7 @@ async def _continue_after_tools(gk_ws, turn: _TurnState, rounds: asyncio.Queue) 
 
 
 async def _run_tool_rounds(
-    rounds: asyncio.Queue, gk_ws, session_state: CallSession, turn: _TurnState
+    rounds: asyncio.Queue, gk_ws, session_state: CallSession, turn: _TurnState, playout: _Playout
 ) -> None:
     """Runs tool rounds off the reader, so a slow tool never stalls Grok's events."""
     try:
@@ -272,7 +348,7 @@ async def _run_tool_rounds(
                         "output": json.dumps(result, default=str),
                     },
                 }))
-            await _continue_after_tools(gk_ws, turn, rounds)
+            await _continue_after_tools(gk_ws, turn, rounds, playout)
     except websockets.ConnectionClosed as exc:
         logger.info(f"[gk->a] Grok WS closed during a tool round: code={exc.code}")
 
@@ -281,9 +357,13 @@ async def _pump_grok_to_actor(gk_ws, actor_ws: WebSocket, session_state: CallSes
     """Reads Grok's events and runs its tool calls until either side ends."""
     turn = _TurnState()
     rounds: asyncio.Queue = asyncio.Queue()
+    playout = _Playout(actor_ws)
     tasks = {
-        asyncio.create_task(_read_grok(gk_ws, actor_ws, turn, rounds), name="gk-reader"),
-        asyncio.create_task(_run_tool_rounds(rounds, gk_ws, session_state, turn), name="gk-tools"),
+        asyncio.create_task(_read_grok(gk_ws, playout, turn, rounds), name="gk-reader"),
+        asyncio.create_task(
+            _run_tool_rounds(rounds, gk_ws, session_state, turn, playout), name="gk-tools"
+        ),
+        asyncio.create_task(playout.run(), name="gk-playout"),
     }
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -296,11 +376,11 @@ async def _pump_grok_to_actor(gk_ws, actor_ws: WebSocket, session_state: CallSes
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def _read_grok(gk_ws, actor_ws: WebSocket, turn: _TurnState, rounds: asyncio.Queue) -> None:
-    """Grok events → audio bytes back to the actor; tool calls → the worker.
+async def _read_grok(gk_ws, playout: _Playout, turn: _TurnState, rounds: asyncio.Queue) -> None:
+    """Grok events → audio to the playout; tool calls → the worker.
 
-    The first output item of each response is forwarded delta-by-delta as the
-    model generates it, so the actor hears the reply onset immediately and
+    The first output item of each response goes to the playout delta-by-delta as
+    the model generates it, so the actor hears the reply onset immediately and
     response latency reflects the model rather than this bridge.
 
     Any *additional* items in the same response are buffered and deduped by
@@ -351,8 +431,7 @@ async def _read_grok(gk_ws, actor_ws: WebSocket, turn: _TurnState, rounds: async
         forwarded_transcripts.add(text)
         forwarded_count += 1
         audio_bytes = bytes(item["audio"])
-        if audio_bytes:
-            await actor_ws.send_bytes(audio_bytes)
+        playout.write(item_id, audio_bytes)
         logger.info(f"[gk->a] rory_said (item {item_id}, {len(audio_bytes)} bytes): {text}")
 
     try:
@@ -377,8 +456,7 @@ async def _read_grok(gk_ws, actor_ws: WebSocket, turn: _TurnState, rounds: async
                     forwarded_count += 1
                     logger.info(f"[gk->a] streaming live item {item_id}")
                 if item_id == live_item_id:
-                    if audio:
-                        await actor_ws.send_bytes(audio)
+                    playout.write(item_id, audio)
                 else:
                     items.setdefault(item_id, _new_item())["audio"].extend(audio)
 
@@ -418,6 +496,16 @@ async def _read_grok(gk_ws, actor_ws: WebSocket, turn: _TurnState, rounds: async
                 logger.info("[gk->a] vad: speech_started")
                 turn.caller_speaking = True
                 turn.touch()
+                interrupted = playout.interrupt()
+                if interrupted:
+                    interrupted_item, audio_end_ms = interrupted
+                    logger.info(f"[gk->a] barge-in: truncate {interrupted_item} at {audio_end_ms} ms")
+                    await gk_ws.send(json.dumps({
+                        "type": "conversation.item.truncate",
+                        "item_id": interrupted_item,
+                        "content_index": 0,
+                        "audio_end_ms": audio_end_ms,
+                    }))
 
             elif etype == "input_audio_buffer.speech_stopped":
                 logger.info("[gk->a] vad: speech_stopped")
@@ -492,5 +580,3 @@ async def _read_grok(gk_ws, actor_ws: WebSocket, turn: _TurnState, rounds: async
             f"[gk->a] Grok WS closed code={exc.code} reason={exc.reason}; "
             f"{n_responses} responses, {n_audio_bytes} audio bytes"
         )
-    except WebSocketDisconnect:
-        logger.info("[gk->a] actor WS closed; ending Grok receive loop")
