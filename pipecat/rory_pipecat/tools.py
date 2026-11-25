@@ -8,7 +8,7 @@ This module is only the Pipecat-shaped wrapper around it:
     dispatch(...)   -> an async handler taking FunctionCallParams
 
 The session travels as Pipecat's ``app_resources``: one object per
-``PipelineTask``, handed to every handler as ``params.app_resources`` and
+``PipelineWorker``, handed to every handler as ``params.app_resources`` and
 absent from the tool schemas the model sees.
 """
 
@@ -17,8 +17,8 @@ from __future__ import annotations
 import asyncio
 from typing import Callable, Dict
 
-from pipecat.adapters.schemas.function_schema import FunctionSchema
-from pipecat.adapters.schemas.tools_schema import ToolsSchema
+from pipecat.adapters.llm.schemas.function_schema import FunctionSchema
+from pipecat.adapters.llm.schemas.tools_schema import ToolsSchema
 from pipecat.services.llm_service import FunctionCallParams
 
 from rory_tools import SCHEMAS, CallSession, dispatch
@@ -46,7 +46,9 @@ def _handler(name: str) -> Callable:
         # Every vendor client is blocking, and this runs on the pipeline's
         # event loop — the same loop carrying audio, VAD and TTS for this call.
         # Called directly, a ten-second vendor timeout is ten seconds of dead
-        # air. The thread hop keeps the caller hearing the line.
+        # air. The thread hop keeps the caller hearing the line. A thread can't
+        # be cancelled, so agent.py registers every tool to run to completion
+        # through an interruption (cancel_on_interruption=False).
         result = await asyncio.to_thread(dispatch, session, name, args)
         await params.result_callback(result)
 

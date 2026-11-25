@@ -127,7 +127,7 @@ def test_pipecat_seeds_assistant_greeting_and_speaks_it_on_connect(monkeypatch):
         monkeypatch.setattr(agent, name, lambda: None)
     monkeypatch.setattr(agent, "LLMContext", context)
     with pytest.raises(ContextCaptured):
-        agent._build_pipeline_task(SimpleNamespace())
+        agent._build_pipeline_worker(SimpleNamespace())
     assert captured[-1] == {"role": "assistant", "content": GREETING}
 
     handlers = {}
@@ -138,12 +138,14 @@ def test_pipecat_seeds_assistant_greeting_and_speaks_it_on_connect(monkeypatch):
         return register
 
     transport = SimpleNamespace(event_handler=event_handler)
-    task = SimpleNamespace(queue_frames=AsyncMock(), cancel=AsyncMock())
-    async def run(_):
+    worker = SimpleNamespace(queue_frames=AsyncMock(), cancel=AsyncMock())
+    async def run():
         await handlers["on_client_connected"](transport, None)
-    monkeypatch.setattr(agent, "_build_pipeline_task", lambda _: task)
-    monkeypatch.setattr(agent, "PipelineRunner", lambda **kwargs: SimpleNamespace(run=run))
+    monkeypatch.setattr(agent, "_build_pipeline_worker", lambda _: worker)
+    monkeypatch.setattr(
+        agent, "WorkerRunner", lambda **kwargs: SimpleNamespace(add_workers=AsyncMock(), run=run)
+    )
     asyncio.run(agent._run_with_transport(transport, "test"))
-    frames = task.queue_frames.await_args.args[0]
+    frames = worker.queue_frames.await_args.args[0]
     assert len(frames) == 1
     assert frames[0].text == GREETING

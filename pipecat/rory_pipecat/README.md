@@ -16,10 +16,10 @@ The container startup and how to run a simulation live in the
 
 | Module | Role |
 |--------|------|
-| `agent.py` | The Pipecat pipeline. Deepgram STT → `gpt-4.1-mini` → ElevenLabs TTS with Silero VAD turn-taking, and `run_voice_ws_bot`, the per-connection entry point. |
+| `agent.py` | The Pipecat pipeline. Deepgram STT → `gpt-4.1-mini` → ElevenLabs TTS with Silero VAD and Smart Turn v3 turn-taking, gated on the LLM's turn-completion marker (`●` complete, `◐`/`○` incomplete — Pipecat's `FilterIncompleteUserTurnStrategies`; the markers stay in the model's messages), and `run_voice_ws_bot`, the per-connection entry point. |
 | `tools.py` | The Pipecat adapter: turns each shared `ToolSchema` into a `FunctionSchema`, and wraps `rory_tools.dispatch` in a `FunctionCallParams` handler. No tool logic of its own. |
 | `web.py` | A FastAPI app exposing `WS /voice` (and `/health`) on `:8008`. Hands each accepted WebSocket to `run_voice_ws_bot`. No agent logic — pure transport. |
-| `serializers.py` | `RawPCM16Serializer` — the trivial bytes ↔ frame mapping for the raw PCM16/24 kHz `voice_ws` wire protocol. |
+| `serializers.py` | `RawPCM16Serializer` — the bytes ↔ frame mapping for the raw PCM16/24 kHz `voice_ws` wire protocol. Inbound audio is resampled to the pipeline's 16 kHz input rate, which Silero VAD requires; outbound 24 kHz TTS audio passes through. |
 
 `__init__.py` is empty — this is a plain namespace package, started as
 `uvicorn rory_pipecat.web:app` when `RORY_AGENT_APP` names it.
@@ -101,7 +101,7 @@ used more energy on a month when they used less.
 **Identity is enforced, not judged.** `verify_caller` checks the caller's three
 answers inside the tool and returns a bare boolean; the account it matched
 stays on the `CallSession` and never enters the transcript. That session is
-Pipecat's own per-call state — `PipelineTask(app_resources=CallSession())`,
+Pipecat's own per-call state — `PipelineWorker(app_resources=CallSession())`,
 read back in every handler as `params.app_resources` — so it is scoped to one
 call by the framework rather than by anything this app remembers to do. Every
 tool that touches account data reads its subject from there, so there is no
@@ -131,14 +131,6 @@ The seam is not hidden, but it *is* enforced, in one place:
 enrolment and opens the Fineract loan at exactly that principal. An arrangement
 whose amount does not match the balance it is meant to clear is worse than no
 arrangement, and no vendor can catch it.
-
-## Tool results are always non-empty dicts
-
-Pipecat's aggregator only re-runs the LLM after a tool call `if frame.result:`.
-A falsy result (`{}`) means the agent never speaks again and the call deadlocks
-to the simulation timeout. So a miss returns `{"error": "…"}` rather than `{}`,
-and the list tools wrap their possibly-empty list in a named key
-(`{"bills": []}`).
 
 ## Money is in cents
 

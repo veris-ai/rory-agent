@@ -13,11 +13,9 @@ reason about. It is also what makes the environment honest: the shape mismatch
 between "Stripe customer" and "utility account" exists only at a layer the
 agent does not look at.
 
-Every result is a NON-EMPTY dict. Some frameworks (Pipecat's aggregator among
-them) only re-run the LLM after a tool call ``if frame.result:``, so a falsy
-result means the agent never speaks again and the call deadlocks to the
-simulation timeout. Misses return ``{"error": ...}``; list tools wrap a
-possibly-empty list in a named key.
+Every result is a NON-EMPTY dict, so the model is always told what happened:
+misses return ``{"error": ...}``; list tools wrap a possibly-empty list in a
+named key.
 
 Identity is not one of the model's arguments. ``verify_caller`` takes the
 answers the caller gave, checks them against the two systems inside the tool,

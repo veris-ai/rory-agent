@@ -28,7 +28,7 @@ wrong.
 
 | Directory | Voice stack |
 | --- | --- |
-| [`pipecat`](pipecat/) | Pipecat with Deepgram, OpenAI, and ElevenLabs — a cascaded STT → LLM → TTS pipeline |
+| [`pipecat`](pipecat/) | Pipecat with Deepgram, OpenAI, and ElevenLabs — a cascaded STT → LLM → TTS pipeline, Smart Turn v3 ending the caller's turn, gated on the LLM's turn-completion verdict (Pipecat's `FilterIncompleteUserTurnStrategies`) |
 | [`gemini-live`](gemini-live/) | Gemini Live API — a single speech-to-speech model, no STT or TTS of its own; `GEMINI_LIVE_MODEL` picks 2.5 native audio or 3.1 Flash Live |
 | [`gemini-live-xt-thinking`](gemini-live-xt-thinking/) | Gemini 3.8 Live Extended Thinking — the `gemini-live` transport with a pinned thinking level (`GEMINI_THINKING_LEVEL`) and non-blocking tools, which this model requires |
 | [`openai-realtime`](openai-realtime/) | OpenAI Realtime API — speech-to-speech over a websocket; `REALTIME_MODEL` picks the full or mini model |

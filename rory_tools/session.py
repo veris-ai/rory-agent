@@ -53,7 +53,7 @@ class CallSession:
     """Who the caller has proved themselves to be, for one call.
 
     Each transport builds exactly one per call (Pipecat, for example, passes it
-    to ``PipelineTask`` as ``app_resources``), and it dies with the call. It
+    to ``PipelineWorker`` as ``app_resources``), and it dies with the call. It
     holds the account that
     ``verify_caller`` matched on BOTH systems, and that account is the subject
     of every other tool — which is why none of them take an account number
